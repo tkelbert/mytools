@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# USAGE: ./llm_finder [-h|--help]
+# DESC: Find Ollama/ComfyUI/model storage locations
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+if [[ "$1" == "-h" || "$1" == "--help" || $# -ne 0 ]]; then
+  echo -e "${YELLOW}Usage: ./llm_finder [-h|--help]${NC}"
+  echo -e "${YELLOW}Find Ollama/ComfyUI/model storage locations${NC}"
+  exit 0
+fi
+
+echo -e "${CYAN}🔍 Scanning for Ollama/ComfyUI/model storage...${NC}"
+
+# Find directories with 'ollama' or 'comfyui'
+find / -type d -name "*ollama*" -o -name "*comfyui*" -exec echo -e "${GREEN}Directory:${NC} {}${NC}" \; 2>/dev/null | grep -v 'Permission denied'
+
+# Find large model files (100MB+)
+echo -e "${CYAN}📦 Large model files (100MB+):${NC}"
+find / -type f -size +100M -exec du -h {} + | grep -E '^[0-9]+[KMGT] ' | grep -v 'total' | grep -v 'Permission denied'
+
+# Find directories containing model files
+echo -e "${CYAN}🧠 Model storage directories:${NC}"
+find / -type d -exec grep -l -r -e 'model' -e 'checkpoint' -e 'diffusion' -e 'weights' {} + 2>/dev/null | grep -v 'Permission denied'
+
+echo -e "${CYAN}✅ Scan complete. Review output for Ollama/ComfyUI/model locations.${NC}"

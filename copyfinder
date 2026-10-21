@@ -1,0 +1,27 @@
+# USAGE: copyfinder
+# DESC: Find duplicate files across all users
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+# Help message
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo -e "${YELLOW}Usage: copyfinder${NC}"
+    echo -e "${YELLOW}Finds duplicate files across all users${NC}"
+    exit 0
+fi
+
+# Main logic
+find /home /opt /usr /var /tmp /etc -type f -exec md5sum {} + | \
+sort | \
+awk '{print $1, $2}' | \
+sort | \
+uniq -d | \
+while read -r hash; do
+    echo -e "${CYAN}Duplicate files with hash $hash:${NC}"
+    find /home /opt /usr /var /tmp /etc -type f -exec md5sum {} + | \
+    awk -v hash="$hash" '$1 == hash {print $2}' | \
+    xargs -I {} echo -e "${RED}{}${NC}"
+done

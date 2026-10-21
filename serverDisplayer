@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# USAGE: serverDisplayer [interactive | list | status <pid> | pause <pid> | resume <pid> | stop <pid> | restart <pid> | drop-vram <pid>]
+# DESC: Interactively monitor and manage active local servers.
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+USAGE_STR="${YELLOW}Usage: serverDisplayer [interactive | list | status <pid> | pause <pid> | resume <pid> | stop <pid> | restart <pid> | drop-vram <pid>]${NC}\nRun without arguments to launch the interactive menu."
+
+if [[ "$1" == "-h" || "$1" == "--help" || $# -gt 2 ]]; then
+    echo -e "$USAGE_STR"
+    exit 0
+fi
+
+ACTION="${1:-interactive}"
+PID="$2"
+
+if [[ ! "$ACTION" =~ ^(list|interactive)$ && -z "$PID" ]]; then
+    echo -e "${RED}Error: Action '$ACTION' requires a PID.${NC}"
+    echo -e "$USAGE_STR"
+    exit 1
+fi
+
+do_status() {
+    local target_pid=$1
+    echo -e "${CYAN}System Status for PID: $target_pid${NC}"
+    if [[ ! -d "/proc/$target_pid" ]]; then
+        echo -e "${RED}Process not found.${NC}"
+        return 1
+    fi
+    echo -e "${YELLOW}USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND${NC}"
+    ps -p "$target_pid" -o user=,pid=,%cpu=,%mem=,vsz=,rss=,tty=,stat=,start=,time=,cmd= | cut -c 1-100
+}
+
+# Core function to accurately scan and parse network ports
+get_servers() {
+    # -t = TCP, -u = UDP, -n = numeric, -l = listening, -p = process
+    # Using $5 for port and $NF (last field) for the process string to ensure column alignment
+    ss -tunlp | awk 'NR>1 {print $5, $NF}' | while read -r local proc; do
+        pid=$(echo "$proc" | grep -oP 'pid=\K[0-9]+' | head -n1)
+        name=$(echo "$proc" | grep -oP '"\K[^"]+' | head -n1)
+        
+        if [[ -n "$pid" && -d "/proc/$pid" ]]; then
+            echo "$pid|$local|${name:-Unknown}"
+        fi
+    done | sort -u
+}
+
+case "$ACTION" in
+    interactive)
+        if [ "$EUID" -ne 0 ]; then
+            echo -e "${YELLOW}Warning: Run as root (sudo) to ensure all PIDs are visible.${NC}"
+        fi
+        
+        while true; do
+            echo -e "${CYAN}Scanning for active listening servers...${NC}"
+            mapfile -t servers < <(get_servers)
+
+            if [[ ${#servers[@]} -eq 0 ]]; then
+                echo -e "${RED}No active servers found.${NC}"
+                exit 0
+            fi
+
+            echo -e "\n${YELLOW}--- Active Servers ---${NC}"
+            for i in "${!servers[@]}"; do
+                IFS='|' read -r pid port name <<< "${servers[$i]}"
+                echo -e " ${GREEN}$((i+1)))${NC} PID: ${CYAN}$pid${NC} | Port: $port | App: $name"
+            done
+
+            echo ""
+            read -p "Select a server by number (1-${#servers[@]}) or 'q' to quit: " choice
+            
+            if [[ "$choice" == "q" || -z "$choice" ]]; then
+                echo -e "${YELLOW}Exiting.${NC}"
+                exit 0
+            fi
+            
+            if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#servers[@]} )); then
+                echo -e "${RED}Invalid selection. Try again.${NC}"
+                echo ""
+                continue
+            fi
+
+            IFS='|' read -r sel_pid sel_port sel_name <<< "${servers[$((choice-1))]}"
+            echo -e "\n${GREEN}Selected: $sel_name (PID: $sel_pid)${NC}"
+            
+            PS3=$(echo -e "${YELLOW}Select an action to perform on $sel_name (PID: $sel_pid): ${NC}")
+            options=("status" "pause" "resume" "stop" "restart" "drop-vram" "back to menu")
+            select opt in "${options[@]}"; do
+                case $opt in
+                    status)
+                        do_status "$sel_pid"
+                        break ;;
+                    pause)
+                        kill -SIGSTOP "$sel_pid" && echo -e "${GREEN}Server suspended.${NC}" || echo -e "${RED}Failed to pause.${NC}"
+                        break ;;
+                    resume)
+                        kill -SIGCONT "$sel_pid" && echo -e "${GREEN}Server resumed.${NC}" || echo -e "${RED}Failed to resume.${NC}"
+                        break ;;
+                    stop)
+                        kill -SIGTERM "$sel_pid" && echo -e "${GREEN}Server stopped.${NC}" || echo -e "${RED}Failed to stop.${NC}"
+                        break ;;
+                    restart)
+                        cmd=$(tr '\0' ' ' < "/proc/$sel_pid/cmdline")
+                        cwd=$(readlink "/proc/$sel_pid/cwd")
+                        kill -SIGTERM "$sel_pid"
+                        sleep 2
+                        cd "$cwd" && nohup $cmd > /dev/null 2>&1 &
+                        echo -e "${GREEN}Server restarted successfully. New PID: $!${NC}"
+                        break ;;
+                    drop-vram)
+                        cmd=$(tr '\0' ' ' < "/proc/$sel_pid/cmdline")
+                        cwd=$(readlink "/proc/$sel_pid/cwd")
+                        kill -SIGTERM "$sel_pid"
+                        echo -e "${YELLOW}Evicting from GPU and restarting on CPU...${NC}"
+                        sleep 2
+                        cd "$cwd" && env CUDA_VISIBLE_DEVICES="" nohup $cmd > /dev/null 2>&1 &
+                        echo -e "${GREEN}Server migrated to CPU. VRAM freed. New PID: $!${NC}"
+                        break ;;
+                    "back to menu")
+                        break ;;
+                    *) echo -e "${RED}Invalid option.${NC}" ;;
+                esac
+            done
+            echo ""
+        done
+        ;;
+        
+    list)
+        if [ "$EUID" -ne 0 ]; then echo -e "${YELLOW}Warning: Run as root (sudo) for best results.${NC}"; fi
+        get_servers | while IFS='|' read -r pid port name; do
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+            echo -e "${GREEN}PID: ${pid}${NC} | ${YELLOW}Port: ${port}${NC} | ${CYAN}App: ${name}${NC} | Cmd: ${cmd:0:60}..."
+        done
+        ;;
+        
+    status)
+        do_status "$PID"
+        ;;
+        
+    pause)
+        kill -SIGSTOP "$PID" && echo -e "${GREEN}Server suspended.${NC}" || echo -e "${RED}Failed to pause.${NC}"
+        ;;
+        
+    resume)
+        kill -SIGCONT "$PID" && echo -e "${GREEN}Server resumed.${NC}" || echo -e "${RED}Failed to resume.${NC}"
+        ;;
+        
+    stop)
+        kill -SIGTERM "$PID" && echo -e "${GREEN}Server stopped.${NC}" || echo -e "${RED}Failed to stop.${NC}"
+        ;;
+        
+    restart)
+        if [[ ! -d "/proc/$PID" ]]; then echo -e "${RED}Process not found.${NC}"; exit 1; fi
+        cmd=$(tr '\0' ' ' < "/proc/$PID/cmdline")
+        cwd=$(readlink "/proc/$PID/cwd")
+        kill -SIGTERM "$PID"
+        sleep 2
+        cd "$cwd" && nohup $cmd > /dev/null 2>&1 &
+        echo -e "${GREEN}Server restarted successfully. New PID: $!${NC}"
+        ;;
+        
+    drop-vram)
+        if [[ ! -d "/proc/$PID" ]]; then echo -e "${RED}Process not found.${NC}"; exit 1; fi
+        cmd=$(tr '\0' ' ' < "/proc/$PID/cmdline")
+        cwd=$(readlink "/proc/$PID/cwd")
+        kill -SIGTERM "$PID"
+        sleep 2
+        cd "$cwd" && env CUDA_VISIBLE_DEVICES="" nohup $cmd > /dev/null 2>&1 &
+        echo -e "${GREEN}Server migrated to CPU. VRAM freed. New PID: $!${NC}"
+        ;;
+        
+    *)
+        echo -e "${RED}Invalid action: $ACTION${NC}"
+        echo -e "$USAGE_STR"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,76 @@
+#!/bin/bash
+# USAGE: comfy-transfer [minutes]
+# DESC: Transfer and sort ComfyUI models
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo -e "${YELLOW}Usage: comfy-transfer [minutes]"
+    echo -e "Scans /home/theeverjew/Downloads for model files (.safetensors, .ckpt, .pt) and sorts them into /opt/ai-models/ subdirectories."
+    echo -e "Optional [minutes]: Only check files modified within the last N minutes (default: scans all model files in Downloads).${NC}"
+    exit 0
+fi
+
+SRC_DIR="/home/theeverjew/Downloads"
+DEST_DIR="/opt/ai-models"
+
+if [[ ! -d "$SRC_DIR" ]]; then
+    echo -e "${RED}Error: Source directory $SRC_DIR does not exist.${NC}"
+    exit 1
+fi
+
+if [[ ! -d "$DEST_DIR" ]]; then
+    echo -e "${RED}Error: Destination directory $DEST_DIR does not exist.${NC}"
+    exit 1
+fi
+
+MINUTES_ARG="${1:-}"
+
+echo -e "${CYAN}Scanning $SRC_DIR for model files...${NC}"
+
+if [[ -n "$MINUTES_ARG" ]]; then
+    FILES=$(find "$SRC_DIR" -maxdepth 2 -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pt" -o -name "*.pth" \) -mmin "-$MINUTES_ARG")
+else
+    FILES=$(find "$SRC_DIR" -maxdepth 2 -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pt" -o -name "*.pth" \))
+fi
+
+if [[ -z "$FILES" ]]; then
+    echo -e "${YELLOW}No matching model files found in $SRC_DIR.${NC}"
+    exit 0
+fi
+
+echo -e "${GREEN}Found the following model files:${NC}"
+echo "$FILES"
+echo ""
+
+while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    filename=$(basename "$file")
+    target_sub="checkpoints"
+
+    # Intelligent categorization based on filename keywords
+    if [[ "$filename" =~ [vV][aA][eE] ]]; then
+        target_sub="vae"
+    elif [[ "$filename" =~ latent.*upscale|spatial-upscaler ]]; then
+        target_sub="latent_upscale_models"
+    elif [[ "$filename" =~ upscale ]]; then
+        target_sub="upscale_models"
+    elif [[ "$filename" =~ [lL]ora ]]; then
+        target_sub="loras"
+    elif [[ "$filename" =~ transformer|diffusion|dit ]]; then
+        target_sub="diffusion_models"
+    elif [[ "$filename" =~ gemma|qwen|text_encoder|clip|t5 ]]; then
+        target_sub="text_encoders"
+    fi
+
+    target_path="$DEST_DIR/$target_sub"
+    
+    echo -e "Moving ${CYAN}$filename${NC} -> ${GREEN}$target_sub/${NC}"
+    mv "$file" "$target_path/"
+done <<< "$FILES"
+
+echo -e "${GREEN}Transfer and sorting complete!${NC}"
