@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# USAGE: [-a] <URL>
+# DESC: Universal Git, YouTube, or direct downloader
+
+mode="default"
+if [[ "$1" == "--audio" || "$1" == "-a" ]]; then
+    mode="audio"
+    shift
+fi
+
+url="$1"
+if [[ -z "$url" ]]; then
+    echo "Usage: grab [--audio|-a] <URL>"
+    exit 1
+fi
+
+# 1. Git repositories
+if [[ "$url" =~ ^git@ ]] || [[ "$url" =~ \.git$ ]] || [[ "$url" =~ ^https?://(github\.com|gitlab\.com|codeberg\.org)/[^/]+/[^/]+/?$ ]]; then
+    echo "Detected Git repository. Cloning..."
+    git clone "$url"
+    exit $?
+fi
+
+# 2. Video / Streaming sites
+if [[ "$url" =~ (youtube\.com|youtu\.be|twitch\.tv|vimeo\.com|soundcloud\.com|twitter\.com|x\.com|reddit\.com) ]]; then
+    if ! command -v yt-dlp >/dev/null 2>&1; then
+        echo "Error: yt-dlp is not installed. Run 'sudo apt install yt-dlp' or 'pipx install yt-dlp'."
+        exit 1
+    fi
+    if [[ "$mode" == "audio" ]]; then
+        echo "Ripping audio to MP3 via yt-dlp..."
+        yt-dlp -x --audio-format mp3 --audio-quality 0 "$url"
+    else
+        echo "Downloading media via yt-dlp..."
+        yt-dlp "$url"
+    fi
+    exit $?
+fi
+
+# 3. Standard Direct File Download (with resume support)
+echo "Downloading file directly..."
+if command -v wget >/dev/null 2>&1; then
+    wget -c --content-disposition "$url"
+else
+    curl -L -O -C - "$url"
+fi

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# USAGE: [file]
+# DESC: CLI JSON Pretty-Printer & Linter
+if [ -t 0 ]; then
+    # Not piped, expecting a file argument
+    if [ -z "$1" ]; then
+        echo -e "\033[1;33mUsage:\033[0m json <filename.json> OR cat <filename> | json"
+        exit 1
+    fi
+    cat "$1" | python3 -m json.tool
+else
+    # Piped input stream
+    cat | python3 -m json.tool
+fi

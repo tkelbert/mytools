@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# USAGE: <file> <start> <end>
+# DESC: Losslessly cut video with ffmpeg
+
+if [[ $# -lt 3 ]]; then
+    echo "Usage: vidtrim <video_file> <start_time> <end_time>"
+    echo "Example: vidtrim input.mp4 01:15 02:45"
+    exit 1
+fi
+
+input="$1"
+start="$2"
+end="$3"
+ext="${input##*.}"
+base="${input%.*}"
+output="${base}_trimmed.${ext}"
+
+echo "Losslessly trimming '$input' from $start to $end..."
+ffmpeg -hide_banner -loglevel warning -ss "$start" -to "$end" -i "$input" -c copy "$output"
+
+if [[ $? -eq 0 ]]; then
+    echo "Done! Saved to: $output"
+else
+    echo "Error trimming video."
+fi

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# USAGE: [dir]
+# DESC: Sort Downloads folder & find space hogs
+
+dl_dir="${1:-$HOME/Downloads}"
+
+if [[ ! -d "$dl_dir" ]]; then
+    echo "Directory $dl_dir does not exist."
+    exit 1
+fi
+
+echo "Sweeping $dl_dir..."
+count=0
+
+# 1. Clean up dead partial downloads older than 24 hours
+find "$dl_dir" -maxdepth 1 -type f \( -name "*.part" -o -name "*.crdownload" -o -name "*.tmp" \) -mtime +0 -delete
+
+# 2. Sort files by extension
+shopt -s nullglob nocaseglob
+for file in "$dl_dir"/*; do
+    [[ -f "$file" ]] || continue
+    filename=$(basename -- "$file")
+    
+    # Skip active partial downloads
+    [[ "$filename" =~ \.(part|crdownload|tmp)$ ]] && continue
+
+    dest=""
+    case "${filename,,}" in
+        *.deb|*.appimage|*.iso|*.img|*.bin|*.run|*.flatpakref|*.exe|*.msi)
+            dest="$dl_dir/Installers" ;;
+        *.zip|*.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.bz2|*.tbz2|*.tar.zst|*.tar|*.7z|*.rar|*.gz|*.xz|*.zst)
+            dest="$dl_dir/Archives" ;;
+        *.pdf|*.doc|*.docx|*.txt|*.md|*.csv|*.xlsx|*.xls|*.pptx|*.odt|*.epub)
+            dest="$dl_dir/Docs" ;;
+        *.stl|*.obj|*.3mf|*.svg|*.dxf|*.nc|*.gcode|*.step|*.stp)
+            dest="$dl_dir/Fabrication_CAD" ;;
+        *.png|*.jpg|*.jpeg|*.webp|*.gif|*.bmp|*.tiff|*.ico)
+            dest="$dl_dir/Images" ;;
+        *.mp4|*.mkv|*.webm|*.mp3|*.wav|*.flac|*.ogg|*.m4a)
+            dest="$dl_dir/Media" ;;
+        *.py|*.cpp|*.c|*.h|*.hpp|*.sh|*.js|*.json|*.yaml|*.yml|*.xml|*.sql|*.pcap|*.fits)
+            dest="$dl_dir/Code_Data" ;;
+    esac
+
+    if [[ -n "$dest" ]]; then
+        mkdir -p "$dest"
+        mv -n "$file" "$dest/"
+        echo "  Moved: $filename -> $(basename "$dest")/"
+        ((count++))
+    fi
+done
+
+echo "Done! Organized $count file(s)."
+
+# 3. Flag massive files (>500MB) anywhere in Downloads
+echo ""
+echo "Checking for space hogs (>500MB) in $dl_dir..."
+find "$dl_dir" -type f -size +500M -printf "  [LARGE] %s bytes: %p\n" | numfmt --field=2 --to=iec

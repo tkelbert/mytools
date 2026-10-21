@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: Extract latest download smartly
+
+dl_dir="${1:-$HOME/Downloads}"
+
+# Find the most recently modified file in the directory (ignoring subdirectories and partial downloads)
+latest_file=$(find "$dl_dir" -maxdepth 1 -type f \
+    ! -name "*.part" ! -name "*.crdownload" ! -name "*.tmp" \
+    -printf "%T@ %p\n" 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+
+if [[ -z "$latest_file" ]]; then
+    echo "No valid files found in $dl_dir"
+    exit 1
+fi
+
+filename=$(basename -- "$latest_file")
+echo "Found latest download: $filename"
+
+base_name="${filename%.*}"
+base_name="${base_name%.tar}"
+target_dir="$dl_dir/${base_name}_extracted"
+
+case "${filename,,}" in
+    *.tar.bz2|*.tbz2|*.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.zst|*.tar)
+        mkdir -p "$target_dir"
+        echo "Extracting tar archive to $target_dir..."
+        tar -xvf "$latest_file" -C "$target_dir"
+        ;;
+    *.deb)
+        mkdir -p "$target_dir/DEBIAN"
+        echo "Extracting .deb payload and control files to $target_dir..."
+        dpkg-deb -x "$latest_file" "$target_dir"
+        dpkg-deb -e "$latest_file" "$target_dir/DEBIAN"
+        ;;
+    *.zip|*.whl|*.jar|*.apk)
+        mkdir -p "$target_dir"
+        echo "Extracting zip-based archive to $target_dir..."
+        unzip -q "$latest_file" -d "$target_dir"
+        ;;
+    *.7z|*.iso|*.cab|*.rar)
+        mkdir -p "$target_dir"
+        echo "Extracting with 7z to $target_dir..."
+        7z x "$latest_file" -o"$target_dir"
+        ;;
+    *.appimage)
+        echo "Extracting AppImage contents..."
+        chmod +x "$latest_file"
+        (cd "$dl_dir" && "$latest_file" --appimage-extract)
+        ;;
+    *.gz)
+        mkdir -p "$target_dir"
+        echo "Decompressing .gz file to $target_dir..."
+        gunzip -c "$latest_file" > "$target_dir/$base_name"
+        ;;
+    *.bz2)
+        mkdir -p "$target_dir"
+        echo "Decompressing .bz2 file to $target_dir..."
+        bunzip2 -c "$latest_file" > "$target_dir/$base_name"
+        ;;
+    *.xz)
+        mkdir -p "$target_dir"
+        echo "Decompressing .xz file to $target_dir..."
+        unxz -c "$latest_file" > "$target_dir/$base_name"
+        ;;
+    *.zst)
+        mkdir -p "$target_dir"
+        echo "Decompressing .zst file to $target_dir..."
+        zstd -d "$latest_file" -o "$target_dir/$base_name"
+        ;;
+    *)
+        echo "Error: '$filename' is not a recognized archive format."
+        exit 1
+        ;;
+esac
+
+if [[ $? -eq 0 ]]; then
+    echo "Done! Extracted to: $target_dir"
+else
+    echo "Extraction failed."
+    exit 1
+fi

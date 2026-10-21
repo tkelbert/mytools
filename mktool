@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# USAGE: <tool_name>
+# DESC: Generate a blank toolkit template with metadata tags
+
+# --- Color Definitions ---
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# --- Usage Guard ---
+if [[ -z "$1" || "$1" == "-h" || "$1" == "--help" ]]; then
+    echo -e "${YELLOW}Usage: mktool <tool_name>${NC}"
+    echo -e "Scaffolds a blank toolkit script in /opt/custom-toolkit"
+    exit 1
+fi
+
+TOOL_NAME="$1"
+TOOL_PATH="/opt/custom-toolkit/$TOOL_NAME"
+
+if [[ -f "$TOOL_PATH" ]]; then
+    echo -e "${RED}Error: '$TOOL_NAME' already exists.${NC}"
+    exit 1
+fi
+
+# Generate the template
+cat << 'TEMPLATE' > "$TOOL_PATH"
+#!/usr/bin/env bash
+# USAGE: [args]
+# DESC: Custom script (update description here)
+
+# --- Color Definitions ---
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+# --- Usage Guard ---
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo -e "${YELLOW}Usage: TEMPLATE_NAME [args]${NC}"
+    exit 0
+fi
+
+# Your script logic here...
+
+TEMPLATE
+
+# Replace TEMPLATE_NAME with the actual script name in the help string
+sed -i "s/TEMPLATE_NAME/$TOOL_NAME/g" "$TOOL_PATH"
+
+chmod 777 "$TOOL_PATH"
+
+echo -e "${GREEN}✓ Created new tool: $TOOL_NAME${NC}"
+echo -e "Edit it using: nano $TOOL_PATH"

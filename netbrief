@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: 1-second network/VPN/DNS triage
+
+echo "========================================================"
+echo " 🌐 NETWORK & ROUTING TRIAGE"
+echo "========================================================"
+
+# Active Interface, Local IP, and Gateway
+route_info=$(ip route get 1.1.1.1 2>/dev/null)
+iface=$(echo "$route_info" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+local_ip=$(echo "$route_info" | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+gateway=$(echo "$route_info" | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
+
+echo "  Interface   : ${iface:-DISCONNECTED}"
+echo "  Local IP    : ${local_ip:-NONE}"
+echo "  Gateway IP  : ${gateway:-NONE}"
+
+# Check for active VPN / WireGuard / Tun interfaces
+vpn_ifaces=$(ip -br link | awk '$1 ~ /^(wg|tun|tap|tailscale|ppp)/ {print $1 "(" $2 ")"}' | tr '\n' ' ')
+echo "  VPN/Tunnels : ${vpn_ifaces:-None active}"
+
+# DNS Servers
+dns_servers=$(grep "^nameserver" /etc/resolv.conf | awk '{print $2}' | tr '\n' ' ')
+echo "  DNS Servers : ${dns_servers:-None}"
+
+echo "--------------------------------------------------------"
+echo " ⏱️  HOP-BY-HOP HEALTH CHECK"
+echo "--------------------------------------------------------"
+
+# 1. Gateway Ping (Local Wi-Fi / Ethernet health)
+if [[ -n "$gateway" ]]; then
+    gw_ping=$(ping -c 1 -W 1 "$gateway" 2>/dev/null | awk -F'time=' '/time=/ {print $2}')
+    echo "  1. Local Router ($gateway) : ${gw_ping:-❌ TIMEOUT (Check Wi-Fi/Cable)}"
+fi
+
+# 2. Raw IP Ping (ISP Routing health)
+isp_ping=$(ping -c 1 -W 2 1.1.1.1 2>/dev/null | awk -F'time=' '/time=/ {print $2}')
+echo "  2. Outbound IP  (1.1.1.1)     : ${isp_ping:-❌ TIMEOUT (ISP/WAN Down)}"
+
+# 3. DNS Resolution Ping
+dns_ping=$(ping -c 1 -W 2 google.com 2>/dev/null | awk -F'time=' '/time=/ {print $2}')
+echo "  3. DNS Resolve  (google.com)  : ${dns_ping:-❌ FAILED (DNS Broken)}"
+
+# 4. Public IP Lookup
+pub_ip=$(curl -s --max-time 2 https://ifconfig.me || echo "Unavailable")
+echo "  4. Public WAN IP              : $pub_ip"
+echo "========================================================"

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: Smart Journal Tailer
+echo -e "\033[1;36mFetching active and failed services...\033[0m"
+
+# Gather failed and a few active/common services
+failed=$(systemctl list-units --state=failed --type=service --no-legend | awk '{print $1}')
+active=$(systemctl list-units --state=running --type=service --no-legend | head -n 15 | awk '{print $1}')
+
+# Combine, remove empties, and ensure uniqueness
+IFS=$'\n' read -r -d '' -a services < <(echo -e "$failed\n$active" | grep -v '^$' | sort -u && printf '\0')
+
+if [ ${#services[@]} -eq 0 ]; then
+    echo -e "\033[1;31m[ERROR]\033[0m No active or failed services found."
+    exit 0
+fi
+
+echo "Select a service to tail:"
+for i in "${!services[@]}"; do
+    if systemctl is-failed --quiet "${services[$i]}"; then
+        echo -e "  \033[1;31m[$i]\033[0m ${services[$i]} (failed)"
+    else
+        echo -e "  \033[1;32m[$i]\033[0m ${services[$i]}"
+    fi
+done
+echo -e "  \033[1;33m[c]\033[0m Custom service name"
+
+read -p "Enter number (or 'c' for custom): " choice
+
+if [[ "$choice" == "c" ]]; then
+    read -p "Enter exact systemd service name: " target
+else
+    target="${services[$choice]}"
+fi
+
+if [[ -z "$target" ]]; then
+    exit 1
+fi
+
+echo -e "\033[1;36mTailing logs for $target... (Ctrl+C to exit)\033[0m"
+# Tail logs and colorize errors, warnings, and failures via awk
+sudo journalctl -u "$target" -f -n 100 --output=cat | \
+awk '
+tolower($0) ~ /error|failed|fatal|critical/ { print "\033[1;31m" $0 "\033[0m"; next }
+tolower($0) ~ /warn|warning/ { print "\033[1;33m" $0 "\033[0m"; next }
+{ print $0 }'

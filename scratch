@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# USAGE: [cpp|py|sh]
+# DESC: Open ephemeral /tmp workspace
+
+lang="${1,,}"
+stamp=$(date +%H%M%S)
+work_dir="/tmp/scratch_${stamp}"
+mkdir -p "$work_dir"
+
+case "$lang" in
+    cpp|c++)
+        cat << 'CPPEOF' > "$work_dir/main.cpp"
+#include <iostream>
+#include <vector>
+#include <string>
+
+int main() {
+    std::cout << "Scratch C++ ready.\n";
+    return 0;
+}
+CPPEOF
+        echo "Created main.cpp (Compile & run: g++ -std=c++20 main.cpp -o main && ./main)"
+        ;;
+    py|python)
+        cat << 'PYEOF' > "$work_dir/test.py"
+#!/usr/bin/env python3
+
+def main():
+    print("Scratch Python ready.")
+
+if __name__ == "__main__":
+    main()
+PYEOF
+        chmod +x "$work_dir/test.py"
+        echo "Created test.py (Run: ./test.py)"
+        ;;
+    sh|bash)
+        cat << 'SHEOF' > "$work_dir/test.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Scratch Bash ready."
+SHEOF
+        chmod +x "$work_dir/test.sh"
+        echo "Created test.sh (Run: ./test.sh)"
+        ;;
+esac
+
+echo "=========================================================="
+echo " Entered ephemeral workspace: $work_dir"
+echo " Type 'exit' when done to return to your previous folder."
+echo "=========================================================="
+cd "$work_dir" && exec "${SHELL:-/bin/bash}"

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: Fast Terminal Bandwidth Check
+echo -e "\033[1;36mInitializing lightweight speedtest...\033[0m"
+# Check if python3 is available (default on Mint)
+if command -v python3 &> /dev/null; then
+    curl -s https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py | python3 - --simple
+else
+    echo -e "\033[1;31m[ERROR]\033[0m Python3 is required to run this script natively."
+fi

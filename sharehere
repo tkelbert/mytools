@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# USAGE: [file/dir] [port]
+# DESC: LAN server + terminal QR code sharing
+
+target="$1"
+port="${2:-8000}"
+
+# Grab primary local LAN IP
+lan_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+[[ -z "$lan_ip" ]] && lan_ip=$(hostname -I | awk '{print $1}')
+
+if [[ -n "$target" && -f "$target" ]]; then
+    serve_dir=$(dirname "$(realpath "$target")")
+    filename=$(basename "$target")
+    # URL-encode spaces/special characters in filename
+    encoded_name=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+    url="http://${lan_ip}:${port}/${encoded_name}"
+elif [[ -n "$target" && -d "$target" ]]; then
+    serve_dir=$(realpath "$target")
+    url="http://${lan_ip}:${port}/"
+else
+    serve_dir=$(pwd)
+    url="http://${lan_ip}:${port}/"
+fi
+
+echo "=========================================="
+echo " Sharing from : $serve_dir"
+echo " Direct URL   : $url"
+echo "=========================================="
+
+if command -v qrencode >/dev/null 2>&1; then
+    echo "Scan with your phone:"
+    qrencode -t ANSIUTF8 "$url"
+else
+    echo "(Tip: run 'sudo apt install qrencode' to get scannable QR codes right here in the terminal!)"
+fi
+
+echo "Press Ctrl+C to stop sharing."
+python3 -m http.server "$port" --directory "$serve_dir"

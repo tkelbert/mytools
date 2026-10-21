@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: One-click Git backup for your toolkit
+
+# --- Color Definitions ---
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+# --- Usage Guard ---
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo -e "${YELLOW}Usage: toolsync${NC}"
+    echo -e "Automatically commits and pushes all scripts in /opt/custom-toolkit to GitHub."
+    exit 0
+fi
+
+cd /opt/custom-toolkit || { echo -e "${RED}Error: /opt/custom-toolkit not found.${NC}"; exit 1; }
+
+# 1. Initialize if necessary
+if [ ! -d ".git" ]; then
+    echo -e "${CYAN}Initializing new Git repository...${NC}"
+    git init
+    git branch -M main
+fi
+
+# 2. Check for remote repository
+if ! git remote | grep -q '^origin$'; then
+    echo -e "${YELLOW}No GitHub remote found!${NC}"
+    echo -e "Please create a new empty repository on GitHub and paste the SSH or HTTPS URL below."
+    echo -e "(e.g., git@github.com:username/my-toolkit.git)"
+    read -r -p "> URL: " REPO_URL
+    if [[ -z "$REPO_URL" ]]; then
+        echo -e "${RED}Error: No URL provided. Aborting.${NC}"
+        exit 1
+    fi
+    git remote add origin "$REPO_URL"
+fi
+
+# 3. Stage changes
+echo -e "${CYAN}Staging files...${NC}"
+git add .
+
+# 4. Check if there is anything to commit
+if git diff-index --quiet HEAD -- 2>/dev/null && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+    echo -e "${GREEN}✓ Everything is already up to date. Nothing to commit.${NC}"
+    exit 0
+fi
+
+# 5. Commit and Push
+echo -e "${CYAN}Committing changes...${NC}"
+git commit -m "Auto-sync: $(date '+%Y-%m-%d %H:%M:%S')"
+
+echo -e "${CYAN}Pushing to GitHub...${NC}"
+if git push -u origin main; then
+    echo -e "\n${GREEN}✓ Successfully backed up your toolkit!${NC}"
+else
+    echo -e "\n${RED}Error: Push failed. Make sure your GitHub SSH keys or authentication tokens are configured.${NC}"
+    exit 1
+fi

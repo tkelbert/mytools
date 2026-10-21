@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# USAGE: <description>
+# DESC: Translate English to Bash via Ollama
+
+if [[ $# -eq 0 ]]; then
+    echo "Usage: askcmd <describe what you want to do>"
+    echo "Example: askcmd convert all pngs in this folder to jpg"
+    exit 1
+fi
+
+query="$*"
+ollama_url="http://localhost:11434"
+
+# Verify Ollama is running and auto-detect an installed model
+models_json=$(curl -s --max-time 2 "$ollama_url/api/tags")
+if [[ -z "$models_json" ]]; then
+    echo "Error: Could not connect to Ollama at $ollama_url. Is 'ollama serve' running?"
+    exit 1
+fi
+
+model="${OLLAMA_MODEL:-$(python3 -c "import sys, json; data=json.loads(sys.stdin.read()); print(data['models'][0]['name'] if data.get('models') else '')" <<< "$models_json")}"
+
+if [[ -z "$model" ]]; then
+    echo "Error: No Ollama models found. Pull one first (e.g., 'ollama pull llama3')."
+    exit 1
+fi
+
+echo "Asking local model [$model]..."
+
+cmd=$(python3 - "$model" "$query" << 'PYEOF'
+import sys, json, urllib.request, re
+
+model = sys.argv[1]
+query = sys.argv[2]
+
+prompt = (
+    "You are a Linux Bash command generator. Output ONLY the exact single-line bash command "
+    "that accomplishes the user's request. Do NOT include markdown backticks, explanations, "
+    "or comments.\nRequest: " + query
+)
+
+payload = json.dumps({
+    "model": model,
+    "prompt": prompt,
+    "stream": False,
+    "options": {"temperature": 0.1}
+}).encode("utf-8")
+
+req = urllib.request.Request(
+    "http://localhost:11434/api/generate",
+    data=payload,
+    headers={"Content-Type": "application/json"}
+)
+
+with urllib.request.urlopen(req) as resp:
+    res = json.loads(resp.read().decode("utf-8"))
+    out = res.get("response", "").strip()
+    # Strip any accidental markdown code fences
+    out = re.sub(r"^```(?:bash|sh)?\n?", "", out)
+    out = re.sub(r"\n?```$", "", out).strip()
+    print(out)
+PYEOF
+)
+
+if [[ -z "$cmd" ]]; then
+    echo "Failed to generate a command."
+    exit 1
+fi
+
+echo ""
+echo "  Suggested Command:"
+echo "  ----------------------------------------"
+echo "  $cmd"
+echo "  ----------------------------------------"
+echo ""
+read -r -p "Action? [r = Run, c = Copy to clipboard, n = Cancel]: " action
+
+case "${action,,}" in
+    r|run|y)
+        echo "Executing..."
+        eval "$cmd"
+        ;;
+    c|copy)
+        if command -v xclip >/dev/null 2>&1; then
+            echo -n "$cmd" | xclip -selection clipboard
+            echo "Copied to clipboard!"
+        else
+            echo "Install 'xclip' (sudo apt install xclip) to enable direct clipboard copying."
+        fi
+        ;;
+    *)
+        echo "Cancelled."
+        ;;
+esac

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# USAGE: <expr>
+# DESC: CLI Unit & Math Evaluator
+if [[ -z "$*" ]]; then
+    echo -e "\033[1;33mUsage:\033[0m math <expression>"
+    echo -e "\033[1;36mExamples:\033[0m"
+    echo "  math 12.5 * 25.4"
+    echo "  math 350 mb to gb"
+    exit 1
+fi
+
+python3 -c "
+import sys, math, re
+
+expr = ' '.join(sys.argv[1:]).lower()
+
+# Basic byte conversion engine
+size_units = {'b': 1, 'kb': 1024, 'mb': 1024**2, 'gb': 1024**3, 'tb': 1024**4}
+match = re.match(r'^([\d\.]+)\s*([kmgt]?b)\s+(?:to|in)\s+([kmgt]?b)$', expr)
+if match:
+    val, u_from, u_to = match.groups()
+    res = float(val) * size_units[u_from] / size_units[u_to]
+    print(f'\033[1;32m{res:g}\033[0m {u_to.upper()}')
+    sys.exit(0)
+
+# Build a safe math execution environment
+safe_dict = {k: v for k, v in math.__dict__.items() if not k.startswith('_')}
+safe_dict.update({'abs': abs, 'round': round, 'min': min, 'max': max})
+
+try:
+    # Allow terminal users to use ^ for powers instead of **
+    expr = expr.replace('^', '**')
+    result = eval(expr, {'__builtins__': {}}, safe_dict)
+    print(f'\033[1;32m{result}\033[0m')
+except Exception as e:
+    print(f'\033[1;31m[ERROR]\033[0m Could not evaluate expression. {e}')
+" "$@"

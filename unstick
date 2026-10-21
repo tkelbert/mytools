@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# USAGE: <port|dev|path>
+# DESC: Kill process locking port, USB, or mount
+
+target="$1"
+
+if [[ -z "$target" ]]; then
+    echo "Usage:"
+    echo "  unstick <port>          (e.g., unstick 8080)"
+    echo "  unstick <device/path>   (e.g., unstick /dev/ttyUSB0 or /media/usb)"
+    exit 1
+fi
+
+pids=""
+
+# Check if target is a port number
+if [[ "$target" =~ ^[0-9]+$ ]]; then
+    echo "Scanning for processes bound to port :$target..."
+    pids=$(lsof -t -i :"$target" 2>/dev/null)
+    if [[ -z "$pids" ]]; then
+        echo "Nothing found under your user. Checking system-wide with sudo..."
+        pids=$(sudo lsof -t -i :"$target" 2>/dev/null)
+    fi
+elif [[ -e "$target" ]]; then
+    echo "Scanning for processes locking $target..."
+    pids=$(lsof -t "$target" 2>/dev/null)
+    if [[ -z "$pids" ]]; then
+        pids=$(sudo lsof -t "$target" 2>/dev/null)
+    fi
+else
+    echo "Error: '$target' is neither a valid port number nor an existing file/device."
+    exit 1
+fi
+
+# Deduplicate PIDs
+pids=$(echo "$pids" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+
+if [[ -z "${pids// }" ]]; then
+    echo "All clear! No processes are currently holding '$target'."
+    exit 0
+fi
+
+echo ""
+echo "The following process(es) are holding '$target':"
+ps -o pid,user,comm,args -p $pids
+echo ""
+
+read -r -p "Terminate these process(es)? [y/N/f (force kill -9)]: " choice
+case "${choice,,}" in
+    y|yes)
+        kill $pids 2>/dev/null || sudo kill $pids
+        echo "Sent SIGTERM to: $pids"
+        ;;
+    f|force)
+        kill -9 $pids 2>/dev/null || sudo kill -9 $pids
+        echo "Sent SIGKILL (-9) to: $pids"
+        ;;
+    *)
+        echo "Aborted."
+        ;;
+esac

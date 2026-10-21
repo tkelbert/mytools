@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: Show active serial/USB ports & listeners
+
+echo "============================================================"
+echo " 🔌 ACTIVE SERIAL & USB CONTROLLERS (/dev/ttyUSB* | ttyACM*)"
+echo "============================================================"
+found_serial=0
+for dev in /dev/ttyUSB* /dev/ttyACM*; do
+    [[ -e "$dev" ]] || continue
+    found_serial=1
+    info=$(udevadm info -q property -n "$dev" 2>/dev/null | awk -F= '
+        /^ID_VENDOR_FROM_DATABASE=/ {v=$2}
+        /^ID_MODEL_FROM_DATABASE=/ {m=$2}
+        /^ID_VENDOR=/ && !v {v=$2}
+        /^ID_MODEL=/ && !m {m=$2}
+        END {print v " " m}')
+    user_proc=$(lsof -t "$dev" 2>/dev/null | xargs -r ps -o comm= -p | tr '\n' ' ')
+    if [[ -n "$user_proc" ]]; then
+        status="[IN USE by: $user_proc]"
+    else
+        status="[FREE]"
+    fi
+    printf "  %-14s %-18s %s\n" "$dev" "$status" "$info"
+done
+[[ $found_serial -eq 0 ]] && echo "  No serial devices (ttyUSB/ttyACM) currently connected."
+
+echo ""
+echo "============================================================"
+echo " 💾 REMOVABLE & USB STORAGE DRIVES"
+echo "============================================================"
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,MODEL -e 7 | awk 'NR==1 || /usb|sd|mmc|nvme/'
+
+echo ""
+echo "============================================================"
+echo " 📡 CONNECTED USB HARDWARE (Excluding Empty Root Hubs)"
+echo "============================================================"
+lsusb | grep -vE "Linux Foundation .* root hub" | sed 's/^/  /'
+
+echo ""
+echo "============================================================"
+echo " 🌐 ACTIVE LISTENING NETWORK PORTS (TCP)"
+echo "============================================================"
+sudo ss -tulpn | awk 'NR==1 {print "  Proto  Local_Address          Process"} 
+    NR>1 && $1=="tcp" {printf "  %-6s %-22s %s\n", $1, $5, $7}'

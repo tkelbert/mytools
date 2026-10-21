@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: Watch & diff /dev nodes and USB bus live
+
+tmp_before_dev=$(mktemp)
+tmp_before_usb=$(mktemp)
+tmp_after_dev=$(mktemp)
+tmp_after_usb=$(mktemp)
+
+cleanup() {
+    rm -f "$tmp_before_dev" "$tmp_before_usb" "$tmp_after_dev" "$tmp_after_usb"
+}
+trap cleanup EXIT
+
+ls -1 /dev > "$tmp_before_dev"
+lsusb > "$tmp_before_usb"
+
+echo "👀 Watching USB bus and /dev nodes..."
+echo "👉 Plug in or unplug your device now (Press Ctrl+C to cancel)..."
+
+while true; do
+    sleep 0.5
+    ls -1 /dev > "$tmp_after_dev"
+    lsusb > "$tmp_after_usb"
+
+    dev_diff=$(diff -u "$tmp_before_dev" "$tmp_after_dev" | grep -E "^[\+\-][^\+\-]")
+    usb_diff=$(diff -u "$tmp_before_usb" "$tmp_after_usb" | grep -E "^[\+\-][^\+\-]")
+
+    if [[ -n "$dev_diff" || -n "$usb_diff" ]]; then
+        echo ""
+        echo "⚡ HARDWARE CHANGE DETECTED!"
+        echo "===================================================="
+        if [[ -n "$usb_diff" ]]; then
+            echo "USB Bus Change (+ Added / - Removed):"
+            echo "$usb_diff" | sed 's/^/  /'
+            echo ""
+        fi
+        if [[ -n "$dev_diff" ]]; then
+            echo "/dev Nodes Change (+ Added / - Removed):"
+            echo "$dev_diff" | sed 's/^/  /dev\//' | sed 's/  \/dev\/+/  + \/dev\//; s/  \/dev\/-/  - \/dev\//'
+            echo ""
+        fi
+        echo "Recent Kernel Logs (dmesg):"
+        sudo dmesg | tail -n 8 | sed 's/^/  /'
+        echo "===================================================="
+        break
+    fi
+done

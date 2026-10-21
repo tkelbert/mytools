@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: Interactive Port Term-Finder
+echo -e "\033[1;36mActive Listening Ports:\033[0m"
+sudo ss -tulpn | grep LISTEN | awk '{print $1, $5, $7}' | sed 's/users:(("//g' | sed 's/",pid=/: /g'
+echo ""
+read -p "Enter port number to kill (or Ctrl+C to cancel): " target_port
+
+if [[ -n "$target_port" ]]; then
+    # Find the PID using lsof
+    pid=$(sudo lsof -t -i:"$target_port" -sTCP:LISTEN)
+    if [[ -n "$pid" ]]; then
+        sudo kill -9 $pid
+        echo -e "\033[1;32m[SUCCESS]\033[0m Killed process(es) $pid on port $target_port."
+    else
+        echo -e "\033[1;31m[NOT FOUND]\033[0m No process found listening on port $target_port."
+    fi
+fi

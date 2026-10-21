@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# USAGE: 
+# DESC: PATH Variable Inspector & Cleaner
+echo "Inspecting \$PATH..."
+echo "------------------------------------------------------"
+IFS=':' read -ra DIRS <<< "$PATH"
+for dir in "${DIRS[@]}"; do
+    if [[ -d "$dir" ]]; then
+        echo -e "\033[1;32m[OK]\033[0m   $dir"
+    else
+        echo -e "\033[1;31m[DEAD]\033[0m $dir"
+    fi
+done
+echo "------------------------------------------------------"
