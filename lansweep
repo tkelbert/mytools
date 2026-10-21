@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# USAGE: lansweep [ipv4/cidr | interface]
+# DESC: Fast parallel subnet sweep with MAC vendor resolution
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+usage() {
+    echo -e "${YELLOW}Usage: lansweep [ipv4/cidr | interface]${NC}"
+    echo -e "${CYAN}Examples:${NC}"
+    echo -e "  lansweep                  ${GREEN}# Auto-detect active LAN subnet and sweep${NC}"
+    echo -e "  lansweep 192.168.1.0/24   ${GREEN}# Sweep specific IPv4 CIDR range (/16 to /30)${NC}"
+    echo -e "  lansweep wlan0            ${GREEN}# Sweep primary subnet attached to interface${NC}"
+    exit 1
+}
+
+if [[ $# -gt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
+    usage
+fi
+
+# Locate local OUI database (bundled with Linux Mint / systemd / ieee-data)
+OUI_DB=""
+for f in /usr/share/ieee-data/oui.txt /var/lib/ieee-data/oui.txt /usr/share/misc/oui.txt /usr/share/nmap/nmap-mac-prefixes /lib/udev/hwdb.d/20-OUI.hwdb /usr/lib/udev/hwdb.d/20-OUI.hwdb; do
+    if [[ -r "$f" ]]; then
+        OUI_DB="$f"
+        break
+    fi
+done
+
+lookup_vendor() {
+    local mac="${1^^}"
+    if [[ "$mac" == "LOCAL_HOST" ]]; then
+        echo "This Machine (Local Interface)"
+        return
+    elif [[ -z "$mac" || "$mac" == "--" ]]; then
+        echo "Unknown (L3 Routed / No ARP)"
+        return
+    fi
+
+    # Check Locally Administered Bit (2nd hex char is 2, 6, A, or E)
+    local second_char="${mac:1:1}"
+    local rand_tag=""
+    if [[ "$second_char" =~ [26AE] ]]; then
+        rand_tag="Random/Local MAC"
+    fi
+
+    local oui_clean="${mac//:/}"
+    oui_clean="${oui_clean:0:6}"
+    local oui_dash="${mac:0:2}-${mac:3:2}-${mac:6:2}"
+    local vendor=""
+
+    if [[ -n "$OUI_DB" ]]; then
+        if [[ "$OUI_DB" == *".hwdb" ]]; then
+            vendor=$(awk -v p="OUI:${oui_clean}" '$0 ~ p {getline; sub(/^ ID_OUI_FROM_DATABASE=/, ""); print; exit}' "$OUI_DB" 2>/dev/null)
+        elif [[ "$OUI_DB" == *"nmap-mac-prefixes" ]]; then
+            vendor=$(awk -v p="^${oui_clean} " '$0 ~ p {$1=""; sub(/^ +/, ""); print; exit}' "$OUI_DB" 2>/dev/null)
+        else
+            vendor=$( grep -i -m 1 "^${oui_dash}" "$OUI_DB" 2>/dev/null | sed -E 's/^[^[:space:]]+[[:space:]]+\(hex\)[[:space:]]+//' | tr -d '\r' )
+        fi
+    fi
+
+    if [[ -n "$vendor" ]]; then
+        echo "${vendor:0:36}"
+    elif [[ -n "$rand_tag" ]]; then
+        echo "$rand_tag"
+    else
+        echo "Unknown Vendor (${mac:0:8})"
+    fi
+}
+
+ip_to_int() {
+    local IFS='.'
+    read -r o1 o2 o3 o4 <<< "$1"
+    echo $(( (o1 << 24) | (o2 << 16) | (o3 << 8) | o4 ))
+}
+
+int_to_ip() {
+    echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"
+}
+
+# Resolve target subnet
+TARGET="$1"
+IFACE=""
+MY_IP=""
+GW_IP=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+
+if [[ -z "$TARGET" ]]; then
+    IFACE=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+    if [[ -z "$IFACE" ]]; then
+        echo -e "${RED}Error: Could not auto-detect active default interface.${NC}"
+        usage
+    fi
+    TARGET=$(ip -4 -o addr show dev "$IFACE" scope global | awk '{print $4; exit}')
+    MY_IP="${TARGET%/*}"
+elif [[ ! "$TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+    if ip link show "$TARGET" >/dev/null 2>&1; then
+        IFACE="$TARGET"
+        TARGET=$(ip -4 -o addr show dev "$IFACE" scope global | awk '{print $4; exit}')
+        MY_IP="${TARGET%/*}"
+    else
+        echo -e "${RED}Error: '$TARGET' is neither a valid IPv4/CIDR nor an active network interface.${NC}"
+        usage
+    fi
+else
+    MY_IP=$(ip -4 -o addr show scope global | awk '{sub(/\/.*/, "", $4); print $4; exit}')
+fi
+
+if [[ -z "$TARGET" || "$TARGET" != *"/"* ]]; then
+    echo -e "${RED}Error: Unable to determine IPv4 CIDR for target.${NC}"
+    exit 1
+fi
+
+BASE_IP="${TARGET%/*}"
+CIDR="${TARGET#*/}"
+
+if (( CIDR < 16 || CIDR > 30 )); then
+    echo -e "${RED}Error: CIDR /$CIDR out of practical sweep bounds (supported: /16 to /30).${NC}"
+    exit 1
+fi
+
+BASE_INT=$(ip_to_int "$BASE_IP")
+MASK_INT=$(( (0xFFFFFFFF << (32 - CIDR)) & 0xFFFFFFFF ))
+NET_INT=$(( BASE_INT & MASK_INT ))
+BCAST_INT=$(( NET_INT | ((~MASK_INT) & 0xFFFFFFFF) ))
+FIRST_INT=$(( NET_INT + 1 ))
+LAST_INT=$(( BCAST_INT - 1 ))
+TOTAL_HOSTS=$(( LAST_INT - FIRST_INT + 1 ))
+
+echo -e "${CYAN}======================================================================================${NC}"
+echo -e " ${GREEN}SUBNET SWEEP:${NC} ${YELLOW}$(int_to_ip $NET_INT)/${CIDR}${NC} (${CYAN}${TOTAL_HOSTS} hosts${NC}) ${IFACE:+| ${GREEN}IFACE:${NC} ${YELLOW}${IFACE}${NC}} ${GW_IP:+| ${GREEN}GW:${NC} ${YELLOW}${GW_IP}${NC}}"
+echo -e "${CYAN}======================================================================================${NC}"
+
+TMP_ALIVE=$(mktemp)
+trap 'rm -f "$TMP_ALIVE"' EXIT
+
+echo -ne "${YELLOW}[*] Dispatching parallel ICMP probes and populating kernel ARP cache...${NC}\r"
+
+# Parallel ping sweep (throttled in batches of 128 to prevent ulimit exhaustion on /16-/22)
+batch=0
+for (( i=FIRST_INT; i<=LAST_INT; i++ )); do
+    curr_ip=$(int_to_ip "$i")
+    if [[ "$curr_ip" == "$MY_IP" ]]; then
+        echo "$i $curr_ip 0.01ms" >> "$TMP_ALIVE"
+        continue
+    fi
+    (
+        if out=$(ping -c 1 -W 1 -n "$curr_ip" 2>/dev/null); then
+            rtt=$(awk -F'/' 'END {if ($5 != "") printf "%.1fms", $5; else print "<1ms"}' <<< "$out")
+            echo "$i $curr_ip $rtt" >> "$TMP_ALIVE"
+        fi
+    ) &
+    ((batch++))
+    if (( batch >= 128 )); then
+        wait
+        batch=0
+    fi
+done
+wait
+
+# Also catch firewalled hosts that dropped ICMP but answered the kernel's ARP broadcast
+while read -r neigh_ip _ _ neigh_mac _ neigh_state; do
+    if [[ "$neigh_mac" =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ && "$neigh_state" != "FAILED" ]]; then
+        n_int=$(ip_to_int "$neigh_ip")
+        if (( n_int >= FIRST_INT && n_int <= LAST_INT )); then
+            if ! grep -q "^${n_int} " "$TMP_ALIVE"; then
+                echo "$n_int $neigh_ip ARP" >> "$TMP_ALIVE"
+            fi
+        fi
+    fi
+done < <(ip -4 neigh show)
+
+echo -ne "\033[2K"
+printf "${CYAN}%-16s %-8s %-19s %-10s %s${NC}\n" "IPv4 ADDRESS" "RTT" "MAC ADDRESS" "ROLE" "VENDOR / OUI"
+echo -e "${CYAN}--------------------------------------------------------------------------------------${NC}"
+
+COUNT=0
+while read -r ip_int ip rtt; do
+    ((COUNT++))
+    role="Host"
+    if [[ "$ip" == "$MY_IP" ]]; then
+        mac="LOCAL_HOST"
+        role="Self"
+    else
+        mac=$(ip -4 neigh show "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i~/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/) {print toupper($i); exit}}')
+        [[ -z "$mac" ]] && mac="--"
+        [[ "$ip" == "$GW_IP" ]] && role="Gateway"
+    fi
+
+    vendor=$(lookup_vendor "$mac")
+
+    # Colorize row components
+    if [[ "$role" == "Gateway" ]]; then
+        role_col="${RED}${role}${NC}   "
+    elif [[ "$role" == "Self" ]]; then
+        role_col="${GREEN}${role}${NC}      "
+    else
+        role_col="${CYAN}${role}${NC}      "
+    fi
+
+    if [[ "$rtt" == "ARP" ]]; then
+        rtt_col="${RED}ARP-Only${NC}"
+    else
+        rtt_col=$(printf "${GREEN}%-8s${NC}" "$rtt")
+    fi
+
+    printf "${YELLOW}%-16s${NC} %b ${CYAN}%-19s${NC} %b %s\n" "$ip" "$rtt_col" "$mac" "$role_col" "$vendor"
+done < <(sort -n -k1,1 "$TMP_ALIVE")
+
+echo -e "${CYAN}--------------------------------------------------------------------------------------${NC}"
+echo -e "${GREEN}[+] Scan complete:${NC} ${YELLOW}${COUNT}${NC} active hosts discovered on ${CYAN}$(int_to_ip $NET_INT)/${CIDR}${NC}."
