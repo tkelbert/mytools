@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# USAGE: ipbin <ipv4[/cidr]> [ipv4_2]
+# DESC: Inspect IPv4 binary bit-tables, subnets, and collisions
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+usage() {
+    echo -e "${YELLOW}Usage: ipbin <ipv4[/cidr]> [ipv4_2]${NC}"
+    echo -e "${CYAN}Examples:${NC}"
+    echo -e "  ipbin 192.168.1.50          ${GREEN}# Full octet & bit-weight breakdown${NC}"
+    echo -e "  ipbin 10.0.14.200/22        ${GREEN}# Visual Network vs. Host bit split & CIDR math${NC}"
+    echo -e "  ipbin 10.0.14.200 10.0.12.5 ${GREEN}# Bitwise AND/XOR comparison between two IPs${NC}"
+    exit 1
+}
+
+if [[ $# -lt 1 || $# -gt 2 || "$1" == "-h" || "$1" == "--help" ]]; then
+    usage
+fi
+
+# Validate IPv4 and return 32-bit integer
+ip_to_int() {
+    local ip="$1"
+    if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        return 1
+    fi
+    local IFS='.'
+    read -r o1 o2 o3 o4 <<< "$ip"
+    for o in $o1 $o2 $o3 $o4; do
+        if (( o < 0 || o > 255 )); then
+            return 1
+        fi
+    done
+    echo $(( (o1 << 24) | (o2 << 16) | (o3 << 8) | o4 ))
+}
+
+int_to_ip() {
+    local n=$1
+    echo "$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))"
+}
+
+# Print a 32-bit integer as colorized dotted binary
+# Highlighting network bits (GREEN) vs host bits (YELLOW) based on CIDR
+fmt_32bin() {
+    local val=$1
+    local cidr=${2:-32}
+    local out=""
+    for (( i=31; i>=0; i-- )); do
+        local bit=$(( (val >> i) & 1 ))
+        local bit_idx=$(( 32 - i ))
+        if (( bit_idx <= cidr )); then
+            if (( bit == 1 )); then
+                out+="${GREEN}1${NC}"
+            else
+                out+="${CYAN}0${NC}"
+            fi
+        else
+            if (( bit == 1 )); then
+                out+="${YELLOW}1${NC}"
+            else
+                out+="0"
+            fi
+        fi
+        if (( i % 8 == 0 && i != 0 )); then
+            out+="${CYAN}.${NC}"
+        fi
+    done
+    echo -e "$out"
+}
+
+INPUT1="$1"
+IP1="${INPUT1%/*}"
+CIDR=""
+if [[ "$INPUT1" == *"/"* ]]; then
+    CIDR="${INPUT1#*/}"
+    if [[ ! "$CIDR" =~ ^[0-9]+$ ]] || (( CIDR < 0 || CIDR > 32 )); then
+        echo -e "${RED}Error: Invalid CIDR '/$CIDR' (must be 0-32).${NC}"
+        exit 1
+    fi
+fi
+
+INT1=$(ip_to_int "$IP1") || { echo -e "${RED}Error: Invalid IPv4 address '$IP1'.${NC}"; exit 1; }
+
+# Determine IP Class & RFC Scope
+IFS='.' read -r o1 o2 o3 o4 <<< "$IP1"
+if (( o1 >= 1 && o1 <= 126 )); then CLASS="Class A";
+elif (( o1 == 127 )); then CLASS="Loopback";
+elif (( o1 >= 128 && o1 <= 191 )); then CLASS="Class B";
+elif (( o1 >= 192 && o1 <= 223 )); then CLASS="Class C";
+elif (( o1 >= 224 && o1 <= 239 )); then CLASS="Class D (Multicast)";
+else CLASS="Class E (Experimental)"; fi
+
+SCOPE="Public / Global"
+if (( o1 == 10 )) || (( o1 == 172 && o2 >= 16 && o2 <= 31 )) || (( o1 == 192 && o2 == 168 )); then
+    SCOPE="Private (RFC 1918)"
+elif (( o1 == 127 )); then
+    SCOPE="Loopback (RFC 1122)"
+elif (( o1 == 169 && o2 == 254 )); then
+    SCOPE="Link-Local / APIPA (RFC 3927)"
+elif (( o1 == 100 && o2 >= 64 && o2 <= 127 )); then
+    SCOPE="CGNAT (RFC 6598)"
+elif (( o1 >= 224 && o1 <= 239 )); then
+    SCOPE="Multicast (RFC 5771)"
+fi
+
+HEX_IP=$(printf "0x%02X%02X%02X%02X" "$o1" "$o2" "$o3" "$o4")
+
+echo -e "${CYAN}=====================================================================${NC}"
+echo -e " ${GREEN}IPv4 TARGET:${NC} ${YELLOW}${IP1}${CIDR:+/$CIDR}${NC}  |  ${CYAN}${CLASS}${NC}  |  ${YELLOW}${SCOPE}${NC}"
+echo -e " ${GREEN}INTEGER:${NC}     ${INT1}  |  ${GREEN}HEX:${NC} ${HEX_IP}  |  ${GREEN}ARPA:${NC} ${o4}.${o3}.${o2}.${o1}.in-addr.arpa"
+echo -e "${CYAN}=====================================================================${NC}"
+echo ""
+
+# 1. OCTET POSITIONAL POWER & VALUE TABLE
+echo -e "${YELLOW}[1] OCTET POSITIONAL WEIGHT TABLE (2^7 -> 2^0)${NC}"
+echo -e "${CYAN}+---------+------+------+------+------+------+------+------+------+-------------------+${NC}"
+echo -e "${CYAN}| Octet   | 2^7  | 2^6  | 2^5  | 2^4  | 2^3  | 2^2  | 2^1  | 2^0  | Active Bit Sum    |${NC}"
+echo -e "${CYAN}| Weight  | 128  |  64  |  32  |  16  |   8  |   4  |   2  |   1  | (Decimal Total)   |${NC}"
+echo -e "${CYAN}+---------+------+------+------+------+------+------+------+------+-------------------+${NC}"
+
+idx=1
+for oct in $o1 $o2 $o3 $o4; do
+    printf "${CYAN}|${NC} Octet %d ${CYAN}|${NC}" "$idx"
+    sum_parts=""
+    for (( b=7; b>=0; b-- )); do
+        val=$(( 1 << b ))
+        bit=$(( (oct >> b) & 1 ))
+        if (( bit == 1 )); then
+            printf "  ${GREEN}1${NC}   ${CYAN}|${NC}"
+            sum_parts+="${sum_parts:++}${val}"
+        else
+            printf "  0   ${CYAN}|${NC}"
+        fi
+    done
+    [[ -z "$sum_parts" ]] && sum_parts="0"
+    printf " ${YELLOW}%3d${NC} = %-11s ${CYAN}|${NC}\n" "$oct" "$sum_parts"
+    ((idx++))
+done
+echo -e "${CYAN}+---------+------+------+------+------+------+------+------+------+-------------------+${NC}"
+echo ""
+
+# 2. FULL 32-BIT STREAM & SUBNET ENGINE (IF CIDR OR SINGLE IP)
+DEFAULT_CIDR=${CIDR:-32}
+echo -e "${YELLOW}[2] 32-BIT STREAM${NC} (${GREEN}Green=Network Bits${NC}, ${YELLOW}Yellow=Host Bits${NC})"
+echo -e "  Bit Index : ${CYAN}01......08.09......16.17......24.25......32${NC}"
+echo -e "  IP Binary : $(fmt_32bin "$INT1" "$DEFAULT_CIDR")  (${YELLOW}${IP1}${NC})"
+
+if [[ -n "$CIDR" ]]; then
+    if (( CIDR == 0 )); then
+        MASK_INT=0
+    else
+        MASK_INT=$(( (0xFFFFFFFF << (32 - CIDR)) & 0xFFFFFFFF ))
+    fi
+    WILDCARD_INT=$(( (~MASK_INT) & 0xFFFFFFFF ))
+    NET_INT=$(( INT1 & MASK_INT ))
+    BCAST_INT=$(( NET_INT | WILDCARD_INT ))
+
+    MASK_IP=$(int_to_ip "$MASK_INT")
+    WILDCARD_IP=$(int_to_ip "$WILDCARD_INT")
+    NET_IP=$(int_to_ip "$NET_INT")
+    BCAST_IP=$(int_to_ip "$BCAST_INT")
+
+    echo -e "  Netmask   : $(fmt_32bin "$MASK_INT" "$CIDR")  (${CYAN}${MASK_IP}${NC})"
+    echo -e "  Wildcard  : $(fmt_32bin "$WILDCARD_INT" "$CIDR")  (${CYAN}${WILDCARD_IP}${NC})"
+    echo -e "  Network   : $(fmt_32bin "$NET_INT" "$CIDR")  (${GREEN}${NET_IP}/${CIDR}${NC})"
+    echo -e "  Broadcast : $(fmt_32bin "$BCAST_INT" "$CIDR")  (${RED}${BCAST_IP}${NC})"
+    echo ""
+    echo -e "${YELLOW}[3] SUBNET BOUNDARIES${NC}"
+    if (( CIDR == 32 )); then
+        echo -e "  ${GREEN}Host Route (/32):${NC} Single Host (${YELLOW}${IP1}${NC})"
+    elif (( CIDR == 31 )); then
+        echo -e "  ${GREEN}Point-to-Point (/31 - RFC 3021):${NC} ${YELLOW}$(int_to_ip "$NET_INT")${NC} <-> ${YELLOW}$(int_to_ip "$BCAST_INT")${NC} (2 Usable)"
+    else
+        FIRST_IP=$(int_to_ip $(( NET_INT + 1 )))
+        LAST_IP=$(int_to_ip $(( BCAST_INT - 1 )))
+        USABLE=$(( (1 << (32 - CIDR)) - 2 ))
+        echo -e "  ${GREEN}Usable Range:${NC} ${YELLOW}${FIRST_IP}${NC} -> ${YELLOW}${LAST_IP}${NC}  (${CYAN}${USABLE}${NC} usable hosts)"
+    fi
+fi
+
+# 3. DUAL-IP BITWISE COMPARISON MODE
+if [[ -n "$2" ]]; then
+    IP2="${2%/*}"
+    INT2=$(ip_to_int "$IP2") || { echo -e "${RED}Error: Invalid second IPv4 address '$IP2'.${NC}"; exit 1; }
+    XOR_INT=$(( INT1 ^ INT2 ))
+    AND_INT=$(( INT1 & INT2 ))
+
+    # Calculate longest common prefix (matching leading bits)
+    COMMON_PREFIX=0
+    for (( i=31; i>=0; i-- )); do
+        if (( ((XOR_INT >> i) & 1) == 0 )); then
+            ((COMMON_PREFIX++))
+        else
+            break
+        fi
+    done
+
+    echo ""
+    echo -e "${YELLOW}[3] BITWISE IP COMPARISON & DIFF (${IP1} vs ${IP2})${NC}"
+    echo -e "  IP 1      : $(fmt_32bin "$INT1" "$COMMON_PREFIX")  (${YELLOW}${IP1}${NC})"
+    echo -e "  IP 2      : $(fmt_32bin "$INT2" "$COMMON_PREFIX")  (${YELLOW}${IP2}${NC})"
+
+    # Custom XOR formatter to highlight differing bits in RED
+    xor_out=""
+    for (( i=31; i>=0; i-- )); do
+        bit=$(( (XOR_INT >> i) & 1 ))
+        if (( bit == 1 )); then
+            xor_out+="${RED}1${NC}"
+        else
+            xor_out+="${GREEN}0${NC}"
+        fi
+        if (( i % 8 == 0 && i != 0 )); then
+            xor_out+="${CYAN}.${NC}"
+        fi
+    done
+    echo -e "  XOR (Diff): ${xor_out}  (${RED}1 = Bit Mismatch${NC})"
+    echo -e "  AND (Mask): $(fmt_32bin "$AND_INT" "$COMMON_PREFIX")  (${CYAN}$(int_to_ip "$AND_INT")${NC})"
+    echo -e "  ${GREEN}Common PrefixMatch:${NC} Both IPs share the first ${YELLOW}/${COMMON_PREFIX}${NC} bits."
+    if [[ -n "$CIDR" ]]; then
+        if (( (INT1 & MASK_INT) == (INT2 & MASK_INT) )); then
+            echo -e "  ${GREEN}Subnet Check:${NC}       ${GREEN}SAME SUBNET${NC} under /${CIDR}"
+        else
+            echo -e "  ${GREEN}Subnet Check:${NC}       ${RED}DIFFERENT SUBNETS${NC} under /${CIDR}"
+        fi
+    fi
+fi
