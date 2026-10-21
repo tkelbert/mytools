@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# USAGE: gh-helper [scan [dir] | ssh [email] | push <"msg"> [dir] | status [dir]]
+# DESC: Find GitHub repos, setup SSH, quick commit
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+show_usage() {
+    echo -e "${YELLOW}Usage: gh-helper <command> [arguments]${NC}"
+    echo -e "${YELLOW}  scan [dir]          - Locate all Git repos (defaults to \$HOME)${NC}"
+    echo -e "${YELLOW}  status [dir]        - Compact dirty/clean overview of all found repos${NC}"
+    echo -e "${YELLOW}  ssh [email]         - Generate Ed25519 SSH key & test GitHub auth${NC}"
+    echo -e "${YELLOW}  push <\"msg\"> [dir]  - Stage all, commit, and push (switches HTTPS->SSH if needed)${NC}"
+    exit 1
+}
+
+# Usage Guard
+if [[ "$1" == "-h" || "$1" == "--help" || $# -gt 3 ]]; then
+    show_usage
+fi
+
+CMD="${1:-scan}"
+
+case "$CMD" in
+    scan|status)
+        [[ $# -gt 2 ]] && show_usage
+        SEARCH_DIR="${2:-$HOME}"
+        if [[ ! -d "$SEARCH_DIR" ]]; then
+            echo -e "${RED}[!] Directory not found: $SEARCH_DIR${NC}"
+            exit 1
+        fi
+
+        echo -e "${CYAN}[*] Scanning $SEARCH_DIR for Git repositories...${NC}\n"
+        FOUND=0
+
+        # Prune noisy system/cache directories for fast execution
+        while IFS= read -r gitdir; do
+            FOUND=1
+            repo_dir=$(dirname "$gitdir")
+            branch=$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
+            remote=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || echo "local-only")
+
+            # Format GitHub URLs cleanly
+            if [[ "$remote" == *"github.com"* ]]; then
+                remote_disp=$(echo "$remote" | sed -E 's#(git@github\.com:|https://github\.com/)##; s#\.git$##')
+                remote_tag="${CYAN}GH:${remote_disp}${NC}"
+            else
+                remote_tag="${YELLOW}${remote}${NC}"
+            fi
+
+            # Check working tree & unpushed commits
+            dirty=$(git -C "$repo_dir" status --porcelain 2>/dev/null)
+            ahead=$(git -C "$repo_dir" rev-list --count @{u}..HEAD 2>/dev/null || echo "0")
+
+            state=""
+            [[ -n "$dirty" ]] && state="${RED}[modified]${NC}" || state="${GREEN}[clean]${NC}"
+            [[ "$ahead" -gt 0 ]] && state="${state} ${YELLOW}[↑${ahead} unpushed]${NC}"
+
+            printf "${GREEN}%-42s${NC} ${CYAN}(%s)${NC} %b -> %b\n" "${repo_dir/#$HOME/\~}" "$branch" "$state" "$remote_tag"
+
+            if [[ "$CMD" == "status" && -n "$dirty" ]]; then
+                git -C "$repo_dir" status -s | sed "s/^/    /"
+                echo ""
+            fi
+        done < <(find "$SEARCH_DIR" -maxdepth 5 \( -name ".cache" -o -name ".local" -o -name ".config" -o -name "node_modules" -o -name ".steam" -o -name ".cargo" -o -name "Trash" \) -prune -o -name ".git" -type d -print 2>/dev/null)
+
+        [[ $FOUND -eq 0 ]] && echo -e "${YELLOW}[!] No Git repositories found in $SEARCH_DIR.${NC}"
+        ;;
+
+    ssh)
+        [[ $# -gt 2 ]] && show_usage
+        EMAIL="${2:-$(git config --global user.email)}"
+        KEY_FILE="$HOME/.ssh/id_ed25519"
+        
+        echo -e "${CYAN}[*] Checking SSH setup for GitHub...${NC}"
+        mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+
+        # 1. Check/Generate Ed25519 Key
+        if [[ ! -f "$KEY_FILE" ]]; then
+            if [[ -z "$EMAIL" ]]; then
+                read -rp "Enter email for new SSH key: " EMAIL
+            fi
+            echo -e "${YELLOW}[*] Generating new Ed25519 SSH key...${NC}"
+            ssh-keygen -t ed25519 -C "$EMAIL" -f "$KEY_FILE" -N ""
+        else
+            echo -e "${GREEN}[✓] Existing key found: $KEY_FILE${NC}"
+        fi
+
+        # 2. Ensure ssh-agent is active and key is loaded
+        if ! ssh-add -l &>/dev/null; then
+            eval "$(ssh-agent -s)" >/dev/null
+        fi
+        ssh-add "$KEY_FILE" 2>/dev/null
+
+        # 3. Configure ~/.ssh/config for GitHub
+        touch "$HOME/.ssh/config" && chmod 600 "$HOME/.ssh/config"
+        if ! grep -q "Host github.com" "$HOME/.ssh/config" 2>/dev/null; then
+            cat <<EOC >> "$HOME/.ssh/config"
+
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile $KEY_FILE
+    IdentitiesOnly yes
+EOC
+            echo -e "${GREEN}[✓] Added github.com entry to ~/.ssh/config${NC}"
+        fi
+
+        # 4. Test authentication handshake
+        echo -e "${CYAN}[*] Testing GitHub SSH authentication...${NC}"
+        AUTH_OUT=$(ssh -T -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 git@github.com 2>&1)
+        if echo "$AUTH_OUT" | grep -q "successfully authenticated"; then
+            GH_USER=$(echo "$AUTH_OUT" | awk -F'!' '{print $1}' | sed 's/Hi //')
+            echo -e "${GREEN}[✓] Authenticated with GitHub as: ${GH_USER}${NC}"
+        else
+            echo -e "${YELLOW}[!] Key not yet registered on GitHub. Copy your public key below:${NC}\n"
+            echo -e "${GREEN}$(cat "${KEY_FILE}.pub")${NC}\n"
+            echo -e "${CYAN}--> Add it here: https://github.com/settings/ssh/new${NC}"
+        fi
+        ;;
+
+    push)
+        if [[ $# -lt 2 || $# -gt 3 || -z "$2" ]]; then
+            echo -e "${RED}[!] Commit message required.${NC}"
+            show_usage
+        fi
+        MSG="$2"
+        TARGET_DIR="${3:-.}"
+
+        if ! git -C "$TARGET_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+            echo -e "${RED}[!] Target is not a Git repository: $TARGET_DIR${NC}"
+            exit 1
+        fi
+
+        cd "$TARGET_DIR" || exit 1
+        REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
+        BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        REMOTE_URL=$(git remote get-url origin 2>/dev/null)
+
+        echo -e "${CYAN}[*] Repo:${NC} $REPO_NAME ${CYAN}| Branch:${NC} $BRANCH"
+
+        # Offer automatic HTTPS -> SSH conversion if using GitHub HTTPS
+        if [[ "$REMOTE_URL" == https://github.com/* ]]; then
+            SSH_URL=$(echo "$REMOTE_URL" | sed -E 's#https://github\.com/#git@github.com:#')
+            echo -e "${YELLOW}[!] Remote uses HTTPS ($REMOTE_URL).${NC}"
+            read -rp "Switch remote to SSH ($SSH_URL) to avoid password prompts? [y/N]: " ans
+            if [[ "$ans" =~ ^[Yy]$ ]]; then
+                git remote set-url origin "$SSH_URL"
+                echo -e "${GREEN}[✓] Remote switched to SSH.${NC}"
+            fi
+        fi
+
+        # Check for changes
+        if [[ -z "$(git status --porcelain)" ]]; then
+            echo -e "${YELLOW}[*] Working tree is clean. Checking for unpushed commits...${NC}"
+        else
+            echo -e "${CYAN}[*] Staging changes...${NC}"
+            git status -s
+            git add -A
+            git commit -m "$MSG"
+        fi
+
+        # Push to origin
+        if [[ -n "$(git remote)" ]]; then
+            echo -e "${CYAN}[*] Pushing to origin/${BRANCH}...${NC}"
+            if git push -u origin "$BRANCH"; then
+                echo -e "${GREEN}[✓] Successfully pushed to $REPO_NAME ($BRANCH).${NC}"
+            else
+                echo -e "${RED}[!] Push failed. Run 'gh-helper ssh' if this is an authentication error.${NC}"
+                exit 1
+            fi
+        else
+            echo -e "${YELLOW}[!] Committed locally, but no remote 'origin' is configured.${NC}"
+        fi
+        ;;
+
+    *)
+        show_usage
+        ;;
+esac
