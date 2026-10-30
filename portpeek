@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# USAGE: portpeek <target_ip> [ports: top|all|p1,p2|start-end]
+# DESC: Fast TCP port scanner and banner grabber via /dev/tcp
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+usage() {
+    echo -e "${YELLOW}Usage: portpeek <target_ip> [ports: top|all|p1,p2|start-end]${NC}"
+    echo -e "${CYAN}Examples:${NC}"
+    echo -e "  portpeek 192.168.1.1              ${GREEN}# Scan top 45 common LAN/homelab ports${NC}"
+    echo -e "  portpeek 192.168.1.50 22,80,8080  ${GREEN}# Scan specific comma-separated ports${NC}"
+    echo -e "  portpeek 10.0.0.15 1-1024         ${GREEN}# Scan a continuous port range${NC}"
+    exit 1
+}
+
+if [[ $# -lt 1 || $# -gt 2 || "$1" == "-h" || "$1" == "--help" ]]; then
+    usage
+fi
+
+TARGET="$1"
+SPEC="${2:-top}"
+
+# Curated list including standard services + homelab/self-hosted ports (Ollama, Kodi, OpenWrt, etc.)
+TOP_PORTS=(
+    21 22 23 25 53 80 81 88 110 111 135 139 143 443 445 515 548 554 587 631
+    993 995 1433 1883 2049 2375 3000 3001 3306 3389 5000 5001 5432 5900 6379
+    7860 8000 8006 8080 8096 8123 8443 9000 9090 9443 11434 32400
+)
+
+PORTS=()
+if [[ "$SPEC" == "top" ]]; then
+    PORTS=("${TOP_PORTS[@]}")
+elif [[ "$SPEC" == "all" ]]; then
+    mapfile -t PORTS < <(seq 1 65535)
+else
+    IFS=',' read -ra PARTS <<< "$SPEC"
+    for part in "${PARTS[@]}"; do
+        if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            start="${BASH_REMATCH[1]}"
+            end="${BASH_REMATCH[2]}"
+            if (( start < 1 || end > 65535 || start > end )); then
+                echo -e "${RED}Error: Invalid port range '$part' (must be 1-65535).${NC}"
+                exit 1
+            fi
+            while read -r p; do PORTS+=("$p"); done < <(seq "$start" "$end")
+        elif [[ "$part" =~ ^[0-9]+$ ]] && (( part >= 1 && part <= 65535 )); then
+            PORTS+=("$part")
+        else
+            echo -e "${RED}Error: Invalid port specification '$part'.${NC}"
+            usage
+        fi
+    done
+fi
+
+# Verify target reachability & infer remote OS via ICMP TTL
+TTL_INFO="ICMP Filtered / No Reply"
+if ping_out=$(ping -c 1 -W 1 "$TARGET" 2>/dev/null); then
+    ttl=$(grep -oE 'ttl=[0-9]+' <<< "$ping_out" | cut -d= -f2)
+    if [[ -n "$ttl" ]]; then
+        if (( ttl <= 64 )); then os_guess="Linux / Unix / Embedded (<=64)"
+        elif (( ttl <= 128 )); then os_guess="Windows (<=128)"
+        else os_guess="Network / Cisco IOS (<=255)"; fi
+        TTL_INFO="TTL=${ttl} (${os_guess})"
+    fi
+fi
+
+# Resolve service name from local /etc/services + homelab overrides
+get_service() {
+    local p=$1
+    local srv
+    srv=$(awk -v pat="^[^#]+[[:space:]]+${p}/tcp([[:space:]]|$)" '$0 ~ pat {print $1; exit}' /etc/services 2>/dev/null)
+    if [[ -z "$srv" ]]; then
+        case "$p" in
+            1883)  srv="mqtt" ;;
+            3000)  srv="webui-dev" ;;
+            3001)  srv="anythingllm" ;;
+            5000)  srv="upnp/api" ;;
+            7860)  srv="gradio-sd" ;;
+            8006)  srv="proxmox" ;;
+            8096)  srv="jellyfin" ;;
+            8123)  srv="homeassistant" ;;
+            9000)  srv="portainer" ;;
+            9090)  srv="cockpit/prom" ;;
+            11434) srv="ollama-api" ;;
+            32400) srv="plex" ;;
+            *)     srv="unknown" ;;
+        esac
+    fi
+    echo "$srv"
+}
+
+# Grab service banner or HTTP Server/Title header strictly over /dev/tcp
+grab_banner() {
+    local host=$1
+    local port=$2
+    local raw=""
+
+    raw=$(timeout 1.5 bash -c '
+        exec 3<>"/dev/tcp/$1/$2" 2>/dev/null || exit 1
+        # Wait 0.25s for speak-first protocols (SSH, FTP, SMTP)
+        IFS= read -r -t 0.25 -u 3 line
+        if [[ -z "$line" ]]; then
+            # Send minimal HTTP probe for silent listeners
+            printf "HEAD / HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" "$1" >&3 2>/dev/null
+            while IFS= read -r -t 0.4 -u 3 hline; do
+                hline="${hline%$'\''\r'\''}"
+                if [[ -z "$first" && -n "$hline" ]]; then first="$hline"; fi
+                if [[ "${hline,,}" =~ ^server:[[:space:]]*(.*) ]]; then srv="${BASH_REMATCH[1]}"; fi
+            done
+            if [[ -n "$srv" ]]; then echo "$first | Server: $srv"; else echo "$first"; fi
+        else
+            echo "${line%$'\''\r'\''}"
+        fi
+        exec 3<&- 3>&-
+    ' _ "$host" "$port" 2>/dev/null)
+
+    # Sanitize non-printable characters and truncate to fit terminal nicely
+    raw=$(tr -cd '[:print:]' <<< "$raw" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+/ /g')
+    if [[ -z "$raw" ]]; then
+        echo "-- (Open / Silent Listener)"
+    else
+        echo "${raw:0:52}"
+    fi
+}
+
+echo -e "${CYAN}======================================================================================${NC}"
+echo -e " ${GREEN}TARGET:${NC} ${YELLOW}${TARGET}${NC}  |  ${GREEN}PORTS:${NC} ${CYAN}${#PORTS[@]} queued${NC}  |  ${GREEN}FINGERPRINT:${NC} ${YELLOW}${TTL_INFO}${NC}"
+echo -e "${CYAN}======================================================================================${NC}"
+
+TMP_RES=$(mktemp)
+trap 'rm -f "$TMP_RES"' EXIT
+
+echo -ne "${YELLOW}[*] Probing TCP sockets via /dev/tcp and negotiating banners...${NC}\r"
+
+batch=0
+for port in "${PORTS[@]}"; do
+    (
+        # Fast 0.4s socket check before spending time on banner negotiation
+        if timeout 0.4 bash -c "echo -n > /dev/tcp/${TARGET}/${port}" 2>/dev/null; then
+            srv=$(get_service "$port")
+            banner=$(grab_banner "$TARGET" "$port")
+            printf "%d|%s|%s\n" "$port" "$srv" "$banner" >> "$TMP_RES"
+        fi
+    ) &
+    ((batch++))
+    if (( batch >= 100 )); then
+        wait
+        batch=0
+    fi
+done
+wait
+
+echo -ne "\033[2K"
+printf "${CYAN}%-10s %-9s %-16s %s${NC}\n" "PORT" "STATE" "SERVICE" "BANNER / HEADER RESPONSE"
+echo -e "${CYAN}--------------------------------------------------------------------------------------${NC}"
+
+OPEN_COUNT=0
+if [[ -s "$TMP_RES" ]]; then
+    while IFS='|' read -r p srv bnr; do
+        ((OPEN_COUNT++))
+        printf "${YELLOW}%-10s${NC} ${GREEN}%-9s${NC} ${CYAN}%-16s${NC} %s\n" "${p}/tcp" "OPEN" "$srv" "$bnr"
+    done < <(sort -n -t'|' -k1,1 "$TMP_RES")
+else
+    echo -e " ${RED}No open TCP ports detected in specified range.${NC}"
+fi
+
+echo -e "${CYAN}--------------------------------------------------------------------------------------${NC}"
+echo -e "${GREEN}[+] Scan complete:${NC} ${YELLOW}${OPEN_COUNT}${NC} open TCP port(s) found on ${CYAN}${TARGET}${NC}."

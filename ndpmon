@@ -1,0 +1,157 @@
+#!/bin/bash
+# USAGE: ndpmon <ipv6> <iface>
+# DESC: Solicits and inspects IPv6 neighbor and router advertisements
+
+#####################################
+# Solicits and inspects IPv6 neighbor and router advertisements.
+# Verifies ICMPv6 Neighbor Discovery (NDP) and SLAAC settings.
+#######################################
+
+set -euo pipefail
+
+# --- Color Definitions ---
+readonly COLOR_GREEN='\033[1;32m'
+readonly COLOR_RED='\033[1;31m'
+readonly COLOR_YELLOW='\033[1;33m'
+readonly COLOR_CYAN='\033[1;36m'
+readonly COLOR_BLUE='\033[1;34m'
+readonly COLOR_MAGENTA='\033[1;35m'
+readonly COLOR_NC='\033[0m'
+
+#######################################
+# Print error message to stderr.
+# Arguments:
+#   Message string to print.
+#######################################
+err() {
+  echo -e "${COLOR_RED}[ERROR] ${1}${COLOR_NC}" >&2
+}
+
+#######################################
+# Print script usage information.
+# Outputs:
+#   Writes usage string to stdout in yellow.
+#######################################
+show_usage() {
+  echo -e "${COLOR_YELLOW}Usage: ndpmon <ipv6> <iface>${COLOR_NC}"
+  echo -e "${COLOR_YELLOW}Example: ndpmon fe80::1 eth0${COLOR_NC}"
+  echo "Solicits ICMPv6 Neighbor Discovery & inspects Router Advertisements (SLAAC verification)."
+}
+
+#######################################
+# Inspect SLAAC configuration for an interface.
+# Arguments:
+#   Interface name.
+#######################################
+"inspect_slaac_config() {
+  local iface="${1}"
+  echo -e "\n${COLOR_CYAN}--- [ SLAAC & ICMPv6 Sysctl Verification: ${iface} ] ---${COLOR_NC}"
+
+  local ra_val="N/A"
+  local autoconf_val="N/A"
+
+  if [[ -f "/proc/sys/net/ipv6/conf/${iface}/accept_ra" ]]; then
+    ra_val="$(cat "/proc/sys/net/ipv6/conf/${iface}/accept_ra")"
+  fi
+
+  if [[ -f "/proc/sys/net/ipv6/conf/${iface}/autoconf" ]]; then
+    autoconf_val="$(cat "/proc/sys/net/ipv6/conf/${iface}/autoconf")"
+  fi
+
+  printf "  Accept Router Advertisements (accept_ra) : ${COLOR_YELLOW}%s${COLOR_NC}\n" "${ra_val}"
+  printf "  SLAAC Address Autoconfiguration (autoconf): ${COLOR_YELLOW}%s${COLOR_NC}\n" "${autoconf_val}"
+}
+
+#######################################
+# Solicit neighbor via IPv6 ping and inspect neighbor table.
+# Arguments:
+#   IPv6 target address.
+#   Network interface.
+######################################
+bsolicit_neighbor() {
+  local target_ipv6="${1}"
+  local iface="${2}"
+
+  echo -e "\n${COLOR_CYAN}--- [ ICMPv6 Neighbor Solicitation & Cache Inspection ] ---${COLOR_NC}"
+  echo -e "Sending ICMPv6 Echo Request to trigger NDP solicitation on ${COLOR_YELLOW}${iface}${COLOR_NC}..."
+  if ping -6 -c 2 -W 2 -I "${iface}" "${target_ipv6}" &>/dev/null; then
+    echo -e "Status: ${COLOR_GREEN}RERCHABLE / ECHO REPLY RECEIVED${COLOR_NC}"
+  else
+    echo -e "Status: ${COLOR_YELLOW}NO ECHO REPLY (NDP discovery attempted)${COLOR_NC}"
+  fi
+
+  local neigh_entry
+  neigh_entry="$(ip -6 neigh show dev "${iface}" to "${target_ipv6}" 2>/dev/null || true)"
+
+  if [[ -n "${neigh_entry}" ]]; then
+    local mac="N/A"
+    local state="UNKNOWN"
+    local color_state="${COLOR_NC}"
+
+    if [[ "${neigh_entry}" =~ lladdr[[:space:]]+([^[:space:]]+) ]]; then
+      mac="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ "${neigh_entry}" =~ REACHABLE ]]; then
+      state="REACHABLE"
+      color_state="${COLOR_GREEN}"
+    elif [[ "${neigh_entry}" =~ STALE ]]; then
+      state="STALE"
+      color_state="${COLOR_YELLOW}"
+    elif [[ "${neigh_entry}" =~ DELAY|PROBE ]]; then
+      state="PROBE/DELAY"
+      color_state="${COLOR_MAGENTA}"
+    elif [[ "${neigh_entry}" =~ INCOMPLETE|FAILED ]]; then
+      state="INCOMPLETE/FAILED"
+      color_state="${COLOR_RED}"
+    elif [[ "${neigh_entry}" =~ PERMANENT ]]; then
+      state="PERMANENT"
+      color_state="${COLOR_CYAN}"
+    fi
+
+    printf "  Target IPv6 : ${COLOR_CYAN}%s${COLOR_NC}\n" "${target_ipv6}"
+    printf "  Link Address: ${COLOR_YELLOW}%s${COLOR_NC}\n" "${mac}"
+    printf "  NDP State   : ${color_state}%s${COLOR_NC}\n" "${state}"
+  else
+    echo -e "  Neighbor Cache Entry: ${COLOR_RED}NOT FOUND / INCOMPLETE${COLOR_NC}"
+  fi
+}
+
+######################################
+# Main entry point.
+# Arguments:
+#   Command line arguments.
+#######################################
+main() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    show_usage
+    exit 0
+  fi
+
+  if [[ $# -lt 2 ]]; then
+    err "Missing required parameters."
+    show_usage
+    exit 1
+  fi
+
+  local target_ipv6="${1}"
+  local iface="${2}"
+
+  if ! ip link show "${iface}" &>/dev/null; then
+    err "Interface '${iface}' does not exist."
+    exit 1
+  fi
+
+  echo "========================================================================"
+  echo -e "  ${COLOR_CYAN}🔍 IPv6 NEIGHBOR DISCOVERY & SLAAC MONITOR (ndpmon)${COLOR_NC}"
+  echo "========================================================================"
+  echo -e "Target IPv6 : ${COLOR_YELLOW}${target_ipv6}${COLOR_NC}"
+  echo -e "Interface   : ${COLOR_YELLOW}${iface}${COLOR_NC}"
+
+  solicit_neighbor "${target_ipv6}" "${iface}"
+  inspect_slaac_config "${iface}"
+
+  echo -e "\n========================================================================"
+}
+
+main "$@"

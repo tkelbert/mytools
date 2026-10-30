@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# USAGE: dupfinder [dir] [-m min_size] [-i]
+# DESC: Fast hash-based duplicate file finder
+
+set -euo pipefail
+
+# ANSI Color Codes
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+show_usage() {
+  echo -e "${YELLOW}Usage: dupfinder [directory] [options]${NC}"
+  echo -e "Fast hash-based duplicate file finder using byte-size pre-filtering.\n"
+  echo -e "${BOLD}Options:${NC}"
+  echo -e "  -m, --min-size SIZE   Minimum file size to check (e.g., 100k, 1M, 500c; default: 1k)"
+  echo -e "  -i, --interactive     Interactively select duplicates to delete"
+  echo -e "  -h, --help            Display this help message and exit"
+  echo -e "\n${BOLD}Examples:${NC}"
+  echo -e "  dupfinder ~/Downloads"
+  echo -e "  dupfinder /media/data -m 5M -i"
+  exit 0
+}
+
+TARGET_DIR=""
+MIN_SIZE="1k"
+INTERACTIVE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      show_usage
+      ;;
+    -m|--min-size)
+      if [[ $# -lt 2 ]]; then
+        echo -e "${RED}Error: -m/--min-size requires a value (e.g., 1k, 1M).${NC}" >&2
+        exit 1
+      fi
+      MIN_SIZE="$2"
+      shift 2
+      ;;
+    -i|--interactive)
+      INTERACTIVE=1
+      shift
+      ;;
+    -*)
+      echo -e "${RED}Error: Unknown option '$1'${NC}" >&2
+      show_usage
+      ;;
+    *)
+      if [[ -z "$TARGET_DIR" ]]; then
+        TARGET_DIR="$1"
+      else
+        echo -e "${RED}Error: Multiple target directories specified.${NC}" >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+TARGET_DIR="${TARGET_DIR:-.}"
+
+if [[ ! -d "$TARGET_DIR" ]]; then
+  echo -e "${RED}Error: Directory '$TARGET_DIR' does not exist.${NC}" >&2
+  exit 1
+fi
+
+FIND_SIZE="+$MIN_SIZE"
+if [[ "$MIN_SIZE" =~ ^[0-9]+$ ]]; then
+  FIND_SIZE="+${MIN_SIZE}c"
+fi
+
+TMP_DIR=$(mktemp -d /tmp/dupfinder.XXXXXX)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+RAW_SIZES="$TMP_DIR/raw_sizes.null"
+CANDIDATES="$TMP_DIR/candidates.null"
+HASH_LIST="$TMP_DIR/hashes.txt"
+DUP_RESULTS="$TMP_DIR/dup_results.txt"
+
+echo -e "${CYAN}🔍 Scanning '${TARGET_DIR}' for files (min size: ${MIN_SIZE})...${NC}"
+
+# Phase 1: Collect byte sizes for matching files using null delimiters for space safety
+find "$TARGET_DIR" -type f -size "$FIND_SIZE" -exec stat --printf="%s %n\0" {} + > "$RAW_SIZES" 2>/dev/null || true
+
+if [[ ! -s "$RAW_SIZES" ]]; then
+  echo -e "${GREEN}✨ No files matching criteria found in '${TARGET_DIR}'.${NC}"
+  exit 0
+fi
+
+# Phase 2: Pre-filter files sharing identical byte sizes
+awk -v RS='\0' '
+  NF {
+    size = $1
+    sub(/^[0-9]+ /, "")
+    file = $0
+    sizes[size]++
+    files[size] = (files[size] ? files[size] "\0" : "") file
+  }
+  END {
+    for (s in sizes) {
+      if (sizes[s] > 1) {
+        printf "%s\0", files[s]
+      }
+    }
+  }
+' "$RAW_SIZES" > "$CANDIDATES"
+
+if [[ ! -s "$CANDIDATES" ]]; then
+  echo -e "${GREEN}✨ No duplicate file candidates found (all files have unique sizes).${NC}"
+  exit 0
+fi
+
+CANDIDATE_COUNT=$(awk -v RS='\0' 'NF { count++ } END { print count+0 }' "$CANDIDATES")
+echo -e "${CYAN}⚡ Found ${YELLOW}${CANDIDATE_COUNT}${CYAN} candidate files sharing byte sizes. Computing SHA-256 checksums...${NC}"
+
+# Phase 3: Hash candidate files safely using sha256sum
+xargs -0 sha256sum < "$CANDIDATES" 2>/dev/null > "$HASH_LIST" || true
+
+if [[ ! -s "$HASH_LIST" ]]; then
+  echo -e "${YELLOW}Warning: Could not compute checksums for candidate files.${NC}"
+  exit 0
+fi
+
+# Phase 4: Group identical hashes
+awk '
+  {
+    hash = $1
+    file = substr($0, index($0, "  ") + 2)
+    hashes[hash]++
+    filelist[hash] = (filelist[hash] ? filelist[hash] "\n" : "") file
+  }
+  END {
+    group_id = 1
+    for (h in hashes) {
+      if (hashes[h] > 1) {
+        print "GROUP:" group_id ":" h
+        print filelist[h]
+        group_id++
+      }
+    }
+  }
+' "$HASH_LIST" > "$DUP_RESULTS"
+
+if [[ ! -s "$DUP_RESULTS" ]]; then
+  echo -e "${GREEN}✨ No duplicate files found after hash verification!${NC}"
+  exit 0
+fi
+
+format_bytes() {
+  local bytes=$1
+  if (( bytes >= 1073741824 )); then
+    awk -v b="$bytes" 'BEGIN {printf "%.2f GB", b/1073741824}'
+  elif (( bytes >= 1048576 )); then
+    awk -v b="$bytes" 'BEGIN {printf "%.2f MB", b/1048576}'
+  elif (( bytes >= 1024 )); then
+    awk -v b="$bytes" 'BEGIN {printf "%.2f KB", b/1024}'
+  else
+    echo "${bytes} B"
+  fi
+}
+
+echo ""
+echo -e "${BOLD}======================================================================${NC}"
+echo -e " ${CYAN}👥 DUPLICATE FILES DETECTED${NC}"
+echo -e "${BOLD}======================================================================${NC}"
+
+TOTAL_DUPS=0
+TOTAL_RECLAIMABLE=0
+GROUP_COUNT=0
+FIRST_FILE=1
+declare -a ALL_DUPLICATES_TO_DELETE=()
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "$line" =~ ^GROUP:([0-9]+):([a-f0-9]+)$ ]]; then
+    GROUP_NUM="${BASH_REMATCH[1]}"
+    HASH="${BASH_REMATCH[2]}"
+    GROUP_COUNT=$((GROUP_COUNT + 1))
+    FIRST_FILE=1
+    echo ""
+    echo -e "${YELLOW}Group #${GROUP_NUM}${NC} [SHA256: ${CYAN}${HASH:0:12}...${NC}]"
+  elif [[ -n "$line" ]]; then
+    FILE_PATH="$line"
+    FILE_SIZE=$(stat -c%s "$FILE_PATH" 2>/dev/null || echo 0)
+    FORMATTED_SIZE=$(format_bytes "$FILE_SIZE")
+    
+    if [[ $FIRST_FILE -eq 1 ]]; then
+      echo -e "  ${GREEN}ORIGINAL (Keep):${NC} $FILE_PATH (${FORMATTED_SIZE})"
+      FIRST_FILE=0
+    else
+      echo -e "  ${RED}DUPLICATE:     ${NC} $FILE_PATH (${FORMATTED_SIZE})"
+      TOTAL_DUPS=$((TOTAL_DUPS + 1))
+      TOTAL_RECLAIMABLE=$((TOTAL_RECLAIMABLE + FILE_SIZE))
+      ALL_DUPLICATES_TO_DELETE+=("$FILE_PATH")
+    fi
+  fi
+done < "$DUP_RESULTS"
+
+RECLAIMABLE_HUMAN=$(format_bytes "$TOTAL_RECLAIMABLE")
+
+echo ""
+echo -e "${BOLD}======================================================================${NC}"
+echo -e " ${GREEN}SUMMARY:${NC} Found ${RED}${TOTAL_DUPS}${NC} duplicate copies across ${YELLOW}${GROUP_COUNT}${NC} groups."
+echo -e " ${GREEN}RECLAIMABLE SPACE:${NC} ${BOLD}${CYAN}${RECLAIMABLE_HUMAN}${NC}"
+echo -e "${BOLD}======================================================================${NC}"
+
+if [[ $INTERACTIVE -eq 1 && $TOTAL_DUPS -gt 0 ]]; then
+  echo ""
+  read -rp "Do you want to delete all identified duplicate copies? (y/N): " CONFIRM
+  if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+    DELETED_COUNT=0
+    for dup in "${ALL_DUPLICATES_TO_DELETE[@]}"; do
+      if [[ -f "$dup" ]]; then
+        rm -f "$dup"
+        echo -e "  ${RED}Deleted:${NC} $dup"
+        DELETED_COUNT=$((DELETED_COUNT + 1))
+      fi
+    done
+    echo ""
+    echo -e "${GREEN}Successfully removed ${DELETED_COUNT} duplicate file(s). Cleaned ${RECLAIMABLE_HUMAN}!${NC}"
+  else
+    echo -e "${YELLOW}No files were deleted.${NC}"
+  fi
+fi

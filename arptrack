@@ -1,0 +1,142 @@
+#!/bin/bash
+# USAGE: arptrack [interface]
+# DESC: Real-time Layer 2 ARP cache mutation and eviction monitor
+
+#######################################
+# Real-time Layer 2 ARP cache mutation and eviction monitor.
+# Tracks Address Resolution Protocol aging, state changes, and cache eviction.
+#######################################
+
+set -euo pipefail
+
+# --- Color Definitions ---
+readonly COLOR_GREEN='\033[1;32m'
+readonly COLOR_RED='\033[1;31m'
+readonly COLOR_YELLOW='\033[1;33m'
+readonly COLOR_CYAN='\033[1;36m'
+readonly COLOR_BLUE='\033[1;34m'
+readonly COLOR_MAGENTA='\033[1;35m'
+readonly COLOR_NC='\033[0m'
+
+#######################################
+# Print error message to stderr.
+# Arguments:
+#   Message string to print.
+# Outputs:
+#   Writes message to stderr.
+#######################################
+err() {
+  echo -e "${COLOR_RED}[ERROR] ${1}${COLOR_NC}" >&2
+}
+
+#######################################
+# Print script usage information.
+# Outputs:
+#   Writes usage string to stdout in yellow.
+#######################################
+show_usage() {
+  echo -e "${COLOR_YELLOW}Usage: arptrack [interface]${COLOR_NC}"
+  echo -e "${COLOR_YELLOW}Example: arptrack eth0${COLOR_NC}"
+  echo "Monitors ARP cache table changes (REACHABLE, STALE, DELAY, FAILED, EVICTED) in real time."
+}
+
+#######################################
+# Format and display ARP event line.
+# Arguments:
+#   Line emitted by ip monitor neigh.
+# Outputs:
+#   Formatted colored ARP event record.
+#######################################
+format_arp_event() {
+  local raw_line="${1}"
+  local timestamp
+  timestamp="$(date +'%Y-%m-%d %H:%M:%S')"
+
+  local ip_addr=""
+  local dev_iface=""
+  local mac_addr="N/A"
+  local state="UNKNOWN"
+  local color_state="${COLOR_NC}"
+
+  ip_addr="$(echo "${raw_line}" | awk '{print $1}')"
+
+  if [[ "${raw_line}" =~ dev[[:space:]]+([^[:space:]]+) ]]; then
+    dev_iface="${BASH_REMATCH[1]}"
+  fi
+
+  if [[ "${raw_line}" =~ lladdr[[:space:]]+([^[:space:]]+) ]]; then
+    mac_addr="${BASH_REMATCH[1]}"
+  fi
+
+  if [[ "${raw_line}" =~ REACHABLE ]]; then
+    state="REACHABLE"
+    color_state="${COLOR_GREEN}"
+  elif [[ "${raw_line}" =~ STALE ]]; then
+    state="STALE"
+    color_state="${COLOR_YELLOW}"
+  elif [[ "${raw_line}" =~ DELAY|PROBE ]]; then
+    state="DELAY/PROBE"
+    color_state="${COLOR_MAGENTA}"
+  elif [[ "${raw_line}" =~ PERMANENT|NOARP ]]; then
+    state="PERMANENT"
+    color_state="${COLOR_CYAN}"
+  elif [[ "${raw_line}" =~ FAILED|INCOMPLETE ]]; then
+    state="FAILED/EVICTED"
+    color_state="${COLOR_RED}"
+  elif [[ "${raw_line}" =~ Deleted|DELETE ]]; then
+    state="EVICTED"
+    color_state="${COLOR_RED}"
+  else
+    state="$(echo "${raw_line}" | awk '{print $NF}')"
+    color_state="${COLOR_BLUE}"
+  fi
+
+  printf "[%s] ${COLOR_CYAN}%-15s${COLOR_NC} | ${COLOR_BLUE}%-8s${COLOR_NC} | MAC: ${COLOR_YELLOW}%-17s${COLOR_NC} | State: ${color_state}%-14s${COLOR_NC}\n" \
+    "${timestamp}" "${ip_addr}" "${dev_iface:-all}" "${mac_addr}" "${state}"
+}
+
+#######################################
+# Main function.
+# Arguments:
+#   Command line arguments.
+#######################################
+main() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    show_usage
+    exit 0
+  fi
+
+  local iface=""
+  if [[ -n "${1:-}" ]]; then
+    iface="${1}"
+    if ! ip link show "${iface}" &>/dev/null; then
+      err "Interface '${iface}' does not exist on this system."
+      exit 1
+    fi
+  fi
+
+  echo "========================================================================"
+  echo -e "  ${COLOR_CYAN}📡 REAL-TIME ARP CACHE MUTATION & EVICTION MONITOR (arptrack)${COLOR_NC}"
+  if [[ -n "${iface}" ]]; then
+    echo -e "  ${COLOR_YELLOW}Bound to interface: ${iface}${COLOR_NC}"
+  else
+    echo -e "  ${COLOR_YELLOW}Monitoring all active interfaces${COLOR_NC}"
+  fi
+  echo "========================================================================"
+  printf "${COLOR_BLUE}%-21s | %-15s | %-8s | %-22s | %-14s${COLOR_NC}\n" \
+    "TIMESTAMP" "IP ADDRESS" "IFACE" "MAC ADDRESS" "ARP STATE"
+  echo "------------------------------------------------------------------------"
+
+  local cmd=(ip monitor neigh)
+  if [[ -n "${iface}" ]]; then
+    cmd+=(dev "${iface}")
+  fi
+
+  "${cmd[@]}" | while read -r line; do
+    if [[ -n "${line}" ]]; then
+      format_arp_event "${line}"
+    fi
+  done
+}
+
+main "$@"

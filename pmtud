@@ -1,0 +1,107 @@
+#!/bin/bash
+# USAGE: pmtud <target_ip>
+# DESC: Discovers exact Path MTU via binary search DF ping sweeps
+
+set -euo pipefail
+
+# --- Color Definitions ---
+readonly COLOR_GREEN='\033[1;32m'
+readonly COLOR_RED='\033[1;31m'
+readonly COLOR_YELLOW='\033[1;33m'
+readonly COLOR_CYAN='\033[1;36m'
+readonly COLOR_BLUE='\033[1;34m'
+readonly COLOR_NC='\033[0m'
+
+# Constant header overhead: 20 bytes IPv4 Header + 8 bytes ICMP Header
+readonly HEADER_OVERHEAD=28
+
+err() {
+  echo -e "${COLOR_RED}[ERROR] ${1}${COLOR_NC}" >&2
+}
+
+show_usage() {
+  echo -e "${COLOR_YELLOW}Usage: pmtud <target_ip>${COLOR_NC}"
+  echo -e "${COLOR_YELLOW}Example: pmtud 8.8.8.8${COLOR_NC}"
+  echo "Discovers exact Path MTU using binary search DF (Don't Fragment) ICMP ping probes."
+}
+
+probe_payload() {
+  local target="${1}"
+  local payload="${2}"
+
+  ping -M do -c 1 -W 1 -s "${payload}" "${target}" &>/dev/null
+}
+
+discover_pmtu() {
+  local target="${1}"
+
+  local min_payload=40
+  local max_payload=1472
+  local best_payload=0
+  local mid=0
+  local current_mtu=0
+  local step=1
+
+  echo -e "\n${COLOR_CYAN}--- [ Starting Binary Search DF Ping Sweep ] ---${COLOR_NC}"
+  printf "${COLOR_BLUE}%-6s | %-14s | %-12s | %-20s${COLOR_NC}\n" "STEP" "PAYLOAD SIZE" "PACKET MTU" "DF RESULT"
+  echo "------------------------------------------------------------"
+
+  if ! probe_payload "${target}" "${min_payload}"; then
+    err "Target '${target}' is unreachable or dropping ICMP echo requests."
+    exit 1
+  fi
+
+  while (( min_payload <= max_payload )); do
+    (( mid = (min_payload + max_payload) / 2 ))
+    (( current_mtu = mid + HEADER_OVERHEAD ))
+
+    if probe_payload "${target}" "${mid}"; then
+      printf "%-6d | ${COLOR_GREEN}%-14d${COLOR_NC} | ${COLOR_GREEN}%-12d${COLOR_NC} | ${COLOR_GREEN}%-20s${COLOR_NC}\n" \
+        "${step}" "${mid}" "${current_mtu}" "PASSED (No Frag)"
+      best_payload="${mid}"
+      (( min_payload = mid + 1 ))
+    else
+      printf "%-6d | ${COLOR_RED}%-14d${COLOR_NC} | ${COLOR_RED}%-12d${COLOR_NC} | ${COLOR_RED}%-20s${COLOR_NC}\n" \
+        "${step}" "${mid}" "${current_mtu}" "EXCEEDED / FRAG REQ"
+      (( max_payload = mid - 1 ))
+    fi
+
+    (( step++ ))
+  done
+
+  local final_pmtu=$(( best_payload + HEADER_OVERHEAD ))
+
+  echo "------------------------------------------------------------"
+  echo -e "\n${COLOR_CYAN}========================================================================${COLOR_NC}"
+  echo -e "  ${COLOR_GREEN}🎯 PATH MTU DISCOVERY COMPLETE${COLOR_NC}"
+  echo -e "${COLOR_CYAN}========================================================================${COLOR_NC}"
+  printf "  Target Host    : ${COLOR_YELLOW}%s${COLOR_NC}\n" "${target}"
+  printf "  Max Payload    : ${COLOR_GREEN}%d bytes${COLOR_NC}\n" "${best_payload}"
+  printf "  Header Overhead: ${COLOR_BLUE}%d bytes (20 B IPv4 + 8 B ICMP)${COLOR_NC}\n" "${HEADER_OVERHEAD}"
+  printf "  DISCOVERED PMTU: ${COLOR_GREEN}%d bytes${COLOR_NC}\n" "${final_pmtu}"
+  echo "========================================================================"
+}
+
+main() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    show_usage
+    exit 0
+  fi
+
+  if [[ $# -lt 1 ]]; then
+    err "Target IP address required."
+    show_usage
+    exit 1
+  fi
+
+  local target_ip="${1}"
+
+  echo "========================================================================"
+  echo -e "  ${COLOR_CYAN}🌐 PATH MTU DISCOVERY TOOL (pmtud)${COLOR_NC}"
+  echo "========================================================================"
+  echo -e "Target Address : ${COLOR_YELLOW}${target_ip}${COLOR_NC}"
+
+  discover_pmtu "${target_ip}"
+}
+
+main "$@"
